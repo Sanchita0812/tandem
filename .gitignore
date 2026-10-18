@@ -1,0 +1,95 @@
+# ==============================================================================
+# Tandem (.gitignore)
+# Cross-Platform Bluetooth Bridge: macOS (Swift/AppKit) & Android (Kotlin/Gradle)
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Operating System & Environment
+# ------------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ------------------------------------------------------------------------------
+# Swift Package Manager & macOS Build Caches
+# ------------------------------------------------------------------------------
+.build/
+macos/.build/
+Packages/
+Package.resolved
+Package.pins
+.swiftpm/
+
+# Xcode & Apple Developer Tools
+*.xcodeproj/
+*.xcworkspace/
+!*.xcodeproj/project.pbxproj
+!*.xcworkspace/contents.xcworkspacedata
+xcuserdata/
+DerivedData/
+
+# Transient macOS Build Artifacts (Keep bundled pre-built TandemMac.app)
+macos/build/*.dSYM
+macos/build/*.zip
+macos/build/*.tar.gz
+
+# ------------------------------------------------------------------------------
+# Android & Gradle Build Artifacts
+# ------------------------------------------------------------------------------
+.gradle/
+android/.gradle/
+build/
+android/build/
+android/app/build/
+**/build/
+
+# Machine-Specific Android SDK & Local Config
+local.properties
+android/local.properties
+.bundle/
+
+# Android Studio & IntelliJ IDEA
+.idea/
+*.iml
+.navigation/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Android Keystores & Signing Keys
+*.jks
+*.keystore
+*.key
+*.p12
+
+# Intermediate Class Files & Bytecode
+*.class
+*.dex
+*.ap_
+
+# Output APKs (Ignore transient build outputs, retain pre-built release APKs)
+android/app/build/outputs/
+**/build/outputs/
+*.apk
+!Tandem-v0.1.apk
+!android/Tandem-v0.1.apk
+
+# ------------------------------------------------------------------------------
+# Editors & IDEs
+# ------------------------------------------------------------------------------
+.vscode/
+*.swp
+*.swo
+*~
+*.bak
+
+# ------------------------------------------------------------------------------
+# Diagnostic & Scratch Logs
+# ------------------------------------------------------------------------------
+*.log
+scratch/
+.system_generated/

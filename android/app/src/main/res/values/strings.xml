@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">Tandem</string>
+    <string name="title_bridge">Tandem BLE Bridge</string>
+    <string name="status_idle">Bluetooth Ready • Offline</string>
+    <string name="btn_scan">Scan for Mac</string>
+    <string name="btn_stop_scan">Stop Scan</string>
+    <string name="btn_disconnect">Disconnect</string>
+    <string name="hint_message">Type a message to send to Mac...</string>
+    <string name="btn_send">Send Message</string>
+    <string name="title_discovered_devices">Discovered Mac Devices</string>
+    <string name="title_message_feed">Recent Messages</string>
+    <string name="title_diagnostic_logs">Diagnostic Event Log</string>
+    <string name="location_permission_rationale">Android 10 requires Location permission to discover nearby Bluetooth Low Energy devices. Tandem operates completely offline and never tracks your physical location.</string>
+    <string name="location_services_disabled_prompt">Please enable system Location services (GPS) in quick settings to allow BLE scanning on Android 10.</string>
+</resources>

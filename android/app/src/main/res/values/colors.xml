@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark slate palette -->
+    <color name="bg_dark">#0F1117</color>
+    <color name="bg_surface">#181B22</color>
+    <color name="bg_surface_elevated">#212631</color>
+    <color name="border_subtle">#2E3646</color>
+
+    <!-- Accent & Status colors -->
+    <color name="accent_primary">#2563EB</color>
+    <color name="accent_primary_light">#3B82F6</color>
+    <color name="accent_success">#10B981</color>
+    <color name="accent_warning">#F59E0B</color>
+    <color name="accent_error">#EF4444</color>
+
+    <!-- Text colors -->
+    <color name="text_primary">#FFFFFF</color>
+    <color name="text_secondary">#9CA3AF</color>
+    <color name="text_tertiary">#6B7280</color>
+</resources>
