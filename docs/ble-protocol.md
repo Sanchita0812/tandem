@@ -1,4 +1,4 @@
-# Tandem BLE Protocol Specification (v0.1)
+# Tandem BLE Protocol Specification (v0.2)
 
 ## 1. Service & Characteristic UUID Constants
 
@@ -7,83 +7,154 @@ All implementations must use the following constant 128-bit UUIDs. These UUIDs a
 | Identifier | UUID String | Properties | Purpose |
 | :--- | :--- | :--- | :--- |
 | **Tandem Service** | `7A8D0001-B5A3-4F39-B948-2E1F4B5C6D01` | Primary Service | Identifies the Tandem GATT service |
-| **Rx / Message Characteristic** | `7A8D0002-B5A3-4F39-B948-2E1F4B5C6D01` | `WRITE`, `WRITE_NO_RESPONSE` | Central (Android) writes message envelopes or chunks to Peripheral (Mac) |
-| **Tx / Ack Characteristic** | `7A8D0003-B5A3-4F39-B948-2E1F4B5C6D01` | `NOTIFY`, `READ` | Peripheral (Mac) notifies Central (Android) of delivery ACK or error |
-| **Device Info Characteristic** | `7A8D0004-B5A3-4F39-B948-2E1F4B5C6D01` | `READ` | Peripheral exposes protocol version (`v0.1`) and device name string |
+| **Rx Characteristic** | `7A8D0002-B5A3-4F39-B948-2E1F4B5C6D01` | `WRITE`, `WRITE_NO_RESPONSE` | Central (Android) writes message envelopes, ACKs, or handshake packets to Peripheral (Mac) |
+| **Tx Characteristic** | `7A8D0003-B5A3-4F39-B948-2E1F4B5C6D01` | `NOTIFY`, `READ` | Peripheral (Mac) notifies Central (Android) of messages, ACKs, or handshake responses |
+| **Device Info Characteristic** | `7A8D0004-B5A3-4F39-B948-2E1F4B5C6D01` | `READ` | Peripheral exposes protocol version (`v0.2`) and device name string |
 
 ---
 
-## 2. Message Envelope Format
+## 2. Bidirectional Messaging & E2EE Handshake Architecture
 
-All application messages are transmitted as UTF-8 encoded JSON objects conforming to the versioned envelope schema:
+```
++-------------------------------------------------------------------------------------------------+
+|                                 v0.2 BIDIRECTIONAL E2EE LIFECYCLE                               |
+|                                                                                                 |
+|   Lenovo Tab M10 (Central)                                             MacBook (Peripheral)     |
+|   +-----------------------+                                           +-----------------------+ |
+|   | 1. Generate Ephemeral |                                           |                       | |
+|   |    P-256 Keypair      |                                           |                       | |
+|   |                       |=== Handshake Request (Android Pub) ======>| 2. Generate Ephemeral | |
+|   |                       |    (Write on RX Characteristic)           |    P-256 Keypair      | |
+|   |                       |                                           | 3. Compute ECDH Secret| |
+|   |                       |                                           | 4. Derive AES-256 Key | |
+|   | 6. Compute ECDH Secret|<== Handshake Response (Mac Pub) ==========| 5. Compute SAS Code   | |
+|   | 7. Derive AES-256 Key |    (Notify on TX Characteristic)          |                       | |
+|   | 8. Verify SAS Code    |                                           |                       | |
+|   |    [Code: 482-195]    |<--------- Both screens display matching SAS -------> [Code: 482-195]| |
+|   |                       |                                           |                       | |
+|   | 9. Encrypt & Send     |=== Encrypted Envelope (Android -> Mac) ==>| 10. Decrypt & Render  | |
+|   |    (AES-256-GCM)      |    (Write on RX Characteristic)           | 11. Send Delivery ACK | |
+|   |                       |                                           |                       | |
+|   | 14. Decrypt & Render  |<== Encrypted Envelope (Mac -> Android) ===| 12. Encrypt & Send    | |
+|   | 15. Send Delivery ACK |    (Notify on TX Characteristic)          |     (AES-256-GCM)     | |
+|   +-----------------------+                                           +-----------------------+ |
++-------------------------------------------------------------------------------------------------+
+```
 
+---
+
+## 3. Cryptographic Key Agreement & Handshake
+
+### Ephemeral P-256 Curve Parameters
+- **Curve:** NIST P-256 (`secp256r1` / `prime256v1`).
+- **Raw Public Key Format:** Uncompressed 64 bytes (`X` [32 bytes] || `Y` [32 bytes]).
+
+### Handshake Request (Android -> Mac)
 ```json
 {
-  "version": 1,
-  "type": "text",
-  "message_id": "msg-8f12a3e0-634a-4dfb-9a84-180b5c123456",
+  "version": 2,
+  "type": "handshake",
+  "message_id": "hs-cli-9f3a12b4",
   "timestamp": "2026-10-18T19:30:00.000Z",
-  "payload": "Hello from Android Tablet"
+  "sender": "android",
+  "payload": "<Base64_Android_Raw_64Bytes>"
 }
 ```
 
-### Field Definitions
+### Handshake Response (Mac -> Android)
+```json
+{
+  "version": 2,
+  "type": "handshake_ack",
+  "message_id": "hs-ack-4e2b81d7",
+  "timestamp": "2026-10-18T19:30:00.050Z",
+  "sender": "mac",
+  "payload": "<Base64_Mac_Raw_64Bytes>"
+}
+```
 
-1. `version` (integer, required): Protocol envelope version. Current version is `1`.
-2. `type` (string, required): Message payload type. For v0.1, must be `"text"`. Future versions may introduce `"clip"`, `"file_meta"`, etc.
-3. `message_id` (string, required): Unique identifier (UUIDv4 or prefixed hex timestamp) used for deduplication and acknowledgement matching.
-4. `timestamp` (string, required): ISO-8601 UTC timestamp string generated by the sender.
-5. `payload` (string, required): UTF-8 text message content.
+### Key Derivation (HKDF-SHA256)
+- **Input Keying Material (IKM):** 32-byte ECDH shared secret point coordinate.
+- **Salt:** `"Tandem-v0.2-Salt"`.
+- **Info:** `"AES-256-GCM"`.
+- **Output Key Material (OKM):** 32 bytes (256-bit symmetric session key).
 
-### Validation Rules
-- `payload` length must not exceed **2,048 UTF-8 bytes** for v0.1.
-- Receivers must reject messages with unsupported `version` numbers or missing required keys.
-- Receivers must maintain a circular deduplication cache of the last 64 `message_id`s to silently drop duplicate transmissions caused by retries.
+### Short Authentication String (SAS Verification Code)
+Both devices independently compute a 6-digit verification code to protect against active Man-in-the-Middle (MitM) attacks:
+```
+SortedKeys = sort_lexicographical(LocalPubRaw, PeerPubRaw)
+Digest = SHA-256(SortedKeys[0] || SortedKeys[1])
+CodeNumber = (Digest[0..3] as BigEndian UInt32) % 1,000,000
+SAS = Format("%03d-%03d", CodeNumber / 1000, CodeNumber % 1000)
+```
+Both devices display `🔒 E2EE Active • Code: 482-195`.
 
 ---
 
-## 3. Acknowledgement Format
+## 4. Encrypted Envelope & Payload Schema
 
-When the Mac peripheral successfully receives and parses a valid message, or encounters a framing/JSON error, it emits an acknowledgement notification on the **Tx / Ack Characteristic**:
-
+### Outer Envelope (Over the Air)
 ```json
 {
-  "version": 1,
+  "version": 2,
+  "type": "encrypted",
+  "message_id": "msg-8f12a3e0-634a",
+  "timestamp": "2026-10-18T19:30:05.120Z",
+  "sender": "android",
+  "payload": "<Base64_Combined_Ciphertext>"
+}
+```
+
+### Ciphertext Binary Format (AES-256-GCM)
+`payload` contains Base64-encoded combined bytes:
+- **IV (Nonce):** 12 bytes (cryptographically random per message).
+- **Ciphertext:** Variable length (UTF-8 bytes of Inner Message).
+- **Authentication Tag:** 16 bytes (128-bit Poly1305 / GCM tag).
+
+### Inner Message (Decrypted Plaintext)
+```json
+{
+  "version": 2,
+  "type": "text",
+  "message_id": "msg-8f12a3e0-634a",
+  "timestamp": "2026-10-18T19:30:05.120Z",
+  "sender": "android",
+  "payload": "Hello from Lenovo Tab M10!"
+}
+```
+
+---
+
+## 5. Acknowledgement Envelope
+
+Sent symmetrically by whichever device receives a message:
+```json
+{
+  "version": 2,
   "type": "ack",
-  "message_id": "msg-8f12a3e0-634a-4dfb-9a84-180b5c123456",
+  "message_id": "msg-8f12a3e0-634a",
   "status": "delivered",
   "code": 200,
   "error": null
 }
 ```
 
-- `status`: `"delivered"` or `"error"`.
-- `code`:
-  - `200`: Success.
-  - `400`: Malformed JSON or schema violation.
-  - `413`: Payload exceeds maximum allowed length.
-  - `500`: Internal processing error.
-
 ---
 
-## 4. MTU & Chunk Framing Specification
+## 6. Symmetrical Chunk Framing Specification
 
-### MTU Overview
-- Standard BLE 4.x default ATT MTU is **23 bytes**, which leaves **20 bytes** for user payload (`MTU - 3` bytes ATT header).
-- In Android 10 and macOS CoreBluetooth, ATT MTU exchange allows MTU up to **512 bytes** (usable payload up to **509 bytes**).
-- Android requests `gatt.requestMtu(512)` upon connection.
-
-### Framing Format for Large / Split Payloads
-If an encoded message envelope exceeds the negotiated ATT payload capacity (`negotiated_mtu - 3`), it is transmitted using binary framing chunks:
+When encoded envelopes exceed `negotiated_mtu - 3`, both Android and macOS use identical 11-byte header chunk framing:
 
 | Byte Offset | Size | Type | Field Description |
 | :--- | :--- | :--- | :--- |
 | `0` | 1 byte | uint8 | **Framing Magic / Flags**: `0xAA` (Single frame), `0xAB` (Multi-chunk start/continue), `0xAC` (Final chunk) |
 | `1` | 1 byte | uint8 | **Sequence Index** (0, 1, 2, ...) |
-| `2` | 1 byte | uint8 | **Total Chunks** |
-| `3..10` | 8 bytes | uint64 | **Message Hash / ID Prefix** (8-byte truncated hash of `message_id`) |
-| `11..N` | Variable | bytes | **UTF-8 Chunk Payload** |
+| `2` | 1 byte | uint8 | **Total Chunks** (1 to 64) |
+| `3..10` | 8 bytes | uint64 | **Message Hash / ID Prefix** (8-byte hash of `message_id`) |
+| `11..N` | Variable | bytes | **Chunk Payload Bytes** |
 
-### Reassembly & Timeout Rules
-- If all chunks for a `message_id` arrive within **5.0 seconds**, the receiver concatenates the chunk payloads and parses the JSON envelope.
-- If incomplete after **5.0 seconds**, or if a disconnect occurs, the partial buffer is cleared.
+### Framing & Reassembly Rules
+- **Maximum Chunks:** 64 chunks.
+- **Maximum Assembled Payload:** 4,096 bytes.
+- **Reassembly Buffer Ceiling:** Maximum 16 concurrent pending message streams.
+- **Reassembly Timeout:** 5.0 seconds auto-purge deadline.

@@ -1,11 +1,12 @@
 import AppKit
 import CoreBluetooth
 
-public class MainWindowController: NSWindowController {
+public class MainWindowController: NSWindowController, NSTextFieldDelegate {
     
     private var statusDot: NSView!
     private var statusLabel: NSTextField!
     private var subStatusLabel: NSTextField!
+    private var securityBadge: NSTextField!
     private var advertiseButton: NSButton!
     private var clearFeedButton: NSButton!
     
@@ -13,20 +14,27 @@ public class MainWindowController: NSWindowController {
     private var messagesStackView: NSStackView!
     private var emptyStateLabel: NSTextField!
     
+    // Outgoing Message Composer (Two-Way Messaging)
+    private var composerCard: NSView!
+    private var messageInputField: NSTextField!
+    private var sendButton: NSButton!
+    private var charCountLabel: NSTextField!
+    private var sendStatusLabel: NSTextField!
+    
     private var logTextView: NSTextView!
     private var logScrollView: NSScrollView!
     
-    private var receivedMessages: [TandemMessage] = []
+    private var messageDeliveryLabels: [String: NSTextField] = [:]
     
     public convenience init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 100, y: 100, width: 850, height: 680),
+            contentRect: NSRect(x: 100, y: 100, width: 900, height: 750),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.title = "Tandem — Bluetooth Bridge (v0.1)"
-        window.minSize = NSSize(width: 750, height: 550)
+        window.title = "Tandem — Offline BLE Bridge (v0.2 E2EE)"
+        window.minSize = NSSize(width: 800, height: 600)
         window.isReleasedWhenClosed = false
         window.center()
         self.init(window: window)
@@ -89,10 +97,29 @@ public class MainWindowController: NSWindowController {
         labelBox.alignment = .leading
         labelBox.spacing = 3
         
-        let titleLabel = NSTextField(labelWithString: "Tandem BLE Bridge")
+        let titleRow = NSStackView()
+        titleRow.orientation = .horizontal
+        titleRow.spacing = 10
+        titleRow.alignment = .centerY
+        
+        let titleLabel = NSTextField(labelWithString: "Tandem BLE Bridge (v0.2)")
         titleLabel.font = NSFont.systemFont(ofSize: 18, weight: .bold)
         titleLabel.textColor = .white
-        labelBox.addArrangedSubview(titleLabel)
+        titleRow.addArrangedSubview(titleLabel)
+        
+        // Security Badge (E2EE)
+        securityBadge = NSTextField(labelWithString: " 🔒 End-to-End Encrypted (AES-256-GCM) ")
+        securityBadge.wantsLayer = true
+        securityBadge.layer?.backgroundColor = NSColor(red: 0.05, green: 0.35, blue: 0.2, alpha: 0.8).cgColor
+        securityBadge.layer?.cornerRadius = 6
+        securityBadge.layer?.borderWidth = 1
+        securityBadge.layer?.borderColor = NSColor(red: 0.2, green: 0.8, blue: 0.5, alpha: 0.6).cgColor
+        securityBadge.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .bold)
+        securityBadge.textColor = NSColor(red: 0.4, green: 0.95, blue: 0.6, alpha: 1.0)
+        securityBadge.isHidden = true
+        titleRow.addArrangedSubview(securityBadge)
+        
+        labelBox.addArrangedSubview(titleRow)
         
         statusLabel = NSTextField(labelWithString: "Status: Initializing Bluetooth...")
         statusLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
@@ -120,13 +147,13 @@ public class MainWindowController: NSWindowController {
         rootStack.addArrangedSubview(headerCard)
         headerCard.widthAnchor.constraint(equalTo: rootStack.widthAnchor).isActive = true
         
-        // --- 2. Main Split Area: Messages Feed & Diagnostic Logs ---
+        // --- 2. Main Split Area: Conversation Feed & Diagnostic Logs ---
         let splitView = NSSplitView()
         splitView.isVertical = false
         splitView.dividerStyle = .thin
         splitView.translatesAutoresizingMaskIntoConstraints = false
         
-        // Top Pane: Received Messages Feed
+        // Top Pane: Conversation Feed & Composer
         let messagesPane = NSView()
         messagesPane.translatesAutoresizingMaskIntoConstraints = false
         
@@ -134,7 +161,7 @@ public class MainWindowController: NSWindowController {
         feedHeaderStack.orientation = .horizontal
         feedHeaderStack.translatesAutoresizingMaskIntoConstraints = false
         
-        let feedTitle = NSTextField(labelWithString: "Received Messages Feed")
+        let feedTitle = NSTextField(labelWithString: "Live Conversation Feed (Two-Way)")
         feedTitle.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
         feedTitle.textColor = .white
         feedHeaderStack.addArrangedSubview(feedTitle)
@@ -150,6 +177,7 @@ public class MainWindowController: NSWindowController {
         
         messagesPane.addSubview(feedHeaderStack)
         
+        // Messages Scroll View
         messagesScrollView = NSScrollView()
         messagesScrollView.hasVerticalScroller = true
         messagesScrollView.drawsBackground = false
@@ -167,12 +195,76 @@ public class MainWindowController: NSWindowController {
         documentView.addSubview(messagesStackView)
         messagesScrollView.documentView = documentView
         
-        emptyStateLabel = NSTextField(labelWithString: "No messages received yet.\nConnect from the Android tablet and send a test message.")
+        emptyStateLabel = NSTextField(labelWithString: "No messages yet.\nConnect from the Android tablet to exchange end-to-end encrypted messages.")
         emptyStateLabel.alignment = .center
         emptyStateLabel.textColor = NSColor(white: 0.5, alpha: 1.0)
         emptyStateLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
         emptyStateLabel.translatesAutoresizingMaskIntoConstraints = false
         documentView.addSubview(emptyStateLabel)
+        
+        // Composer Box (Mac -> Android Send)
+        composerCard = createCardView()
+        composerCard.layer?.backgroundColor = NSColor(red: 0.1, green: 0.12, blue: 0.16, alpha: 1.0).cgColor
+        composerCard.translatesAutoresizingMaskIntoConstraints = false
+        
+        let composerInner = NSStackView()
+        composerInner.orientation = .vertical
+        composerInner.spacing = 8
+        composerInner.translatesAutoresizingMaskIntoConstraints = false
+        composerCard.addSubview(composerInner)
+        
+        NSLayoutConstraint.activate([
+            composerInner.topAnchor.constraint(equalTo: composerCard.topAnchor, constant: 10),
+            composerInner.bottomAnchor.constraint(equalTo: composerCard.bottomAnchor, constant: -10),
+            composerInner.leadingAnchor.constraint(equalTo: composerCard.leadingAnchor, constant: 14),
+            composerInner.trailingAnchor.constraint(equalTo: composerCard.trailingAnchor, constant: -14)
+        ])
+        
+        let inputRow = NSStackView()
+        inputRow.orientation = .horizontal
+        inputRow.spacing = 10
+        inputRow.alignment = .centerY
+        
+        messageInputField = NSTextField()
+        messageInputField.placeholderString = "Type a message to send to Android tablet... (Press Return or tap Send)"
+        messageInputField.font = NSFont.systemFont(ofSize: 13)
+        messageInputField.textColor = .white
+        messageInputField.backgroundColor = NSColor(red: 0.05, green: 0.06, blue: 0.08, alpha: 1.0)
+        messageInputField.isBezeled = true
+        messageInputField.bezelStyle = .roundedBezel
+        messageInputField.delegate = self
+        messageInputField.target = self
+        messageInputField.action = #selector(sendTextMessage)
+        inputRow.addArrangedSubview(messageInputField)
+        
+        sendButton = NSButton(title: "Send to Android", target: self, action: #selector(sendTextMessage))
+        sendButton.bezelStyle = .rounded
+        sendButton.keyEquivalent = "\r"
+        sendButton.isEnabled = false
+        inputRow.addArrangedSubview(sendButton)
+        
+        composerInner.addArrangedSubview(inputRow)
+        
+        let metaRow = NSStackView()
+        metaRow.orientation = .horizontal
+        metaRow.spacing = 8
+        
+        charCountLabel = NSTextField(labelWithString: "0 / 4096 bytes")
+        charCountLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        charCountLabel.textColor = NSColor(white: 0.5, alpha: 1.0)
+        metaRow.addArrangedSubview(charCountLabel)
+        
+        let metaSpacer = NSView()
+        metaSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        metaRow.addArrangedSubview(metaSpacer)
+        
+        sendStatusLabel = NSTextField(labelWithString: "Waiting for Android tablet connection...")
+        sendStatusLabel.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        sendStatusLabel.textColor = NSColor(white: 0.6, alpha: 1.0)
+        metaRow.addArrangedSubview(sendStatusLabel)
+        
+        composerInner.addArrangedSubview(metaRow)
+        messagesPane.addSubview(composerCard)
         
         NSLayoutConstraint.activate([
             messagesStackView.topAnchor.constraint(equalTo: documentView.topAnchor, constant: 8),
@@ -181,7 +273,7 @@ public class MainWindowController: NSWindowController {
             messagesStackView.bottomAnchor.constraint(equalTo: documentView.bottomAnchor, constant: -8),
             
             emptyStateLabel.centerXAnchor.constraint(equalTo: documentView.centerXAnchor),
-            emptyStateLabel.centerYAnchor.constraint(equalTo: documentView.centerYAnchor, constant: 30),
+            emptyStateLabel.centerYAnchor.constraint(equalTo: documentView.centerYAnchor),
             
             feedHeaderStack.topAnchor.constraint(equalTo: messagesPane.topAnchor),
             feedHeaderStack.leadingAnchor.constraint(equalTo: messagesPane.leadingAnchor),
@@ -191,7 +283,12 @@ public class MainWindowController: NSWindowController {
             messagesScrollView.topAnchor.constraint(equalTo: feedHeaderStack.bottomAnchor, constant: 8),
             messagesScrollView.leadingAnchor.constraint(equalTo: messagesPane.leadingAnchor),
             messagesScrollView.trailingAnchor.constraint(equalTo: messagesPane.trailingAnchor),
-            messagesScrollView.bottomAnchor.constraint(equalTo: messagesPane.bottomAnchor)
+            messagesScrollView.bottomAnchor.constraint(equalTo: composerCard.topAnchor, constant: -10),
+            
+            composerCard.leadingAnchor.constraint(equalTo: messagesPane.leadingAnchor),
+            composerCard.trailingAnchor.constraint(equalTo: messagesPane.trailingAnchor),
+            composerCard.bottomAnchor.constraint(equalTo: messagesPane.bottomAnchor),
+            composerCard.heightAnchor.constraint(equalToConstant: 76)
         ])
         
         splitView.addSubview(messagesPane)
@@ -276,7 +373,19 @@ public class MainWindowController: NSWindowController {
         
         manager.onMessageReceived = { [weak self] message in
             DispatchQueue.main.async {
-                self?.addMessageCard(message)
+                self?.addMessageCard(message, isOutgoing: false)
+            }
+        }
+        
+        manager.onMessageDelivered = { [weak self] messageId, status in
+            DispatchQueue.main.async {
+                self?.updateDeliveryStatus(messageId: messageId, status: status)
+            }
+        }
+        
+        manager.onSecurityCodeChanged = { [weak self] code in
+            DispatchQueue.main.async {
+                self?.updateSecurityBadge(code: code)
             }
         }
         
@@ -293,21 +402,47 @@ public class MainWindowController: NSWindowController {
         
         switch state {
         case .connected:
-            statusDot.layer?.backgroundColor = NSColor(red: 0.15, green: 0.78, blue: 0.45, alpha: 1.0).cgColor // Vibrant Green
+            statusDot.layer?.backgroundColor = NSColor(red: 0.15, green: 0.78, blue: 0.45, alpha: 1.0).cgColor
+            sendButton.isEnabled = true
+            sendStatusLabel.stringValue = "Connected to tablet • Ready to send"
+            sendStatusLabel.textColor = NSColor(red: 0.3, green: 0.8, blue: 0.5, alpha: 1.0)
         case .advertising:
-            statusDot.layer?.backgroundColor = NSColor(red: 0.2, green: 0.5, blue: 1.0, alpha: 1.0).cgColor // Blue
+            statusDot.layer?.backgroundColor = NSColor(red: 0.2, green: 0.5, blue: 1.0, alpha: 1.0).cgColor
+            sendButton.isEnabled = false
+            sendStatusLabel.stringValue = "Advertising • Waiting for tablet connection..."
+            sendStatusLabel.textColor = NSColor(white: 0.6, alpha: 1.0)
+            updateSecurityBadge(code: nil)
         case .poweredOff, .unauthorized, .unsupported, .error:
             statusDot.layer?.backgroundColor = NSColor.systemRed.cgColor
+            sendButton.isEnabled = false
+            sendStatusLabel.stringValue = "Bluetooth unavailable"
+            sendStatusLabel.textColor = NSColor.systemRed
+            updateSecurityBadge(code: nil)
         case .idle, .resetting:
             statusDot.layer?.backgroundColor = NSColor.systemOrange.cgColor
+            sendButton.isEnabled = false
+            updateSecurityBadge(code: nil)
         }
     }
     
-    private func addMessageCard(_ message: TandemMessage) {
+    private func updateSecurityBadge(code: String?) {
+        if let code = code {
+            securityBadge.stringValue = " 🔒 E2EE Active (AES-256-GCM) • Code: \(code) "
+            securityBadge.isHidden = false
+        } else {
+            securityBadge.isHidden = true
+        }
+    }
+    
+    private func addMessageCard(_ message: TandemMessage, isOutgoing: Bool) {
         emptyStateLabel.isHidden = true
-        receivedMessages.append(message)
         
         let card = createCardView()
+        if isOutgoing {
+            card.layer?.backgroundColor = NSColor(red: 0.10, green: 0.18, blue: 0.14, alpha: 1.0).cgColor
+            card.layer?.borderColor = NSColor(red: 0.2, green: 0.6, blue: 0.35, alpha: 0.5).cgColor
+        }
+        
         let cardStack = NSStackView()
         cardStack.orientation = .vertical
         cardStack.spacing = 8
@@ -322,14 +457,16 @@ public class MainWindowController: NSWindowController {
             cardStack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16)
         ])
         
-        // Card Top Row: Sender Badge + Timestamp
+        // Card Top Row
         let topRow = NSStackView()
         topRow.orientation = .horizontal
         topRow.spacing = 8
         
-        let senderBadge = NSTextField(labelWithString: " Android Tablet (BLE) ")
+        let senderBadge = NSTextField(labelWithString: isOutgoing ? " MacBook (You) " : " Android Tablet (BLE) ")
         senderBadge.wantsLayer = true
-        senderBadge.layer?.backgroundColor = NSColor(red: 0.15, green: 0.35, blue: 0.6, alpha: 0.8).cgColor
+        senderBadge.layer?.backgroundColor = isOutgoing ?
+            NSColor(red: 0.15, green: 0.5, blue: 0.25, alpha: 0.8).cgColor :
+            NSColor(red: 0.15, green: 0.35, blue: 0.6, alpha: 0.8).cgColor
         senderBadge.layer?.cornerRadius = 4
         senderBadge.font = NSFont.systemFont(ofSize: 10, weight: .bold)
         senderBadge.textColor = .white
@@ -343,6 +480,15 @@ public class MainWindowController: NSWindowController {
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         topRow.addArrangedSubview(spacer)
+        
+        let deliveryBadge = NSTextField(labelWithString: isOutgoing ? "Sending..." : "Received (Verified)")
+        deliveryBadge.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
+        deliveryBadge.textColor = isOutgoing ? NSColor.systemOrange : NSColor(red: 0.3, green: 0.8, blue: 0.5, alpha: 1.0)
+        topRow.addArrangedSubview(deliveryBadge)
+        
+        if isOutgoing {
+            messageDeliveryLabels[message.message_id] = deliveryBadge
+        }
         
         let idLabel = NSTextField(labelWithString: String(message.message_id.prefix(12)))
         idLabel.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
@@ -362,6 +508,51 @@ public class MainWindowController: NSWindowController {
         card.widthAnchor.constraint(equalTo: messagesStackView.widthAnchor).isActive = true
     }
     
+    private func updateDeliveryStatus(messageId: String, status: String) {
+        if let label = messageDeliveryLabels[messageId] {
+            label.stringValue = status
+            label.textColor = NSColor(red: 0.3, green: 0.85, blue: 0.5, alpha: 1.0)
+        }
+    }
+    
+    @objc private func sendTextMessage() {
+        let text = messageInputField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        
+        messageInputField.stringValue = ""
+        charCountLabel.stringValue = "0 / 4096 bytes"
+        sendButton.isEnabled = false
+        sendStatusLabel.stringValue = "Encrypting & dispatching chunks..."
+        
+        let localMsg = TandemMessage(
+            version: BleProtocol.protocolVersion,
+            type: "text",
+            sender: "mac",
+            payload: text
+        )
+        addMessageCard(localMsg, isOutgoing: true)
+        
+        BlePeripheralManager.shared.sendMessage(text: text) { [weak self] success, detail in
+            DispatchQueue.main.async {
+                self?.sendButton.isEnabled = true
+                if success {
+                    self?.sendStatusLabel.stringValue = "Delivered to Android (Ack 200)"
+                    self?.sendStatusLabel.textColor = NSColor(red: 0.3, green: 0.85, blue: 0.5, alpha: 1.0)
+                    self?.updateDeliveryStatus(messageId: localMsg.message_id, status: "Delivered (Ack 200)")
+                } else {
+                    self?.sendStatusLabel.stringValue = "Delivery failed: \(detail)"
+                    self?.sendStatusLabel.textColor = NSColor.systemRed
+                    self?.updateDeliveryStatus(messageId: localMsg.message_id, status: "Failed: \(detail)")
+                }
+            }
+        }
+    }
+    
+    public func controlTextDidChange(_ obj: Notification) {
+        let count = messageInputField.stringValue.utf8.count
+        charCountLabel.stringValue = "\(count) / 4096 bytes"
+    }
+    
     private func appendLog(_ line: String) {
         logTextView.textStorage?.append(NSAttributedString(
             string: line + "\n",
@@ -378,7 +569,7 @@ public class MainWindowController: NSWindowController {
     }
     
     @objc private func clearFeed() {
-        receivedMessages.removeAll()
+        messageDeliveryLabels.removeAll()
         for subview in messagesStackView.arrangedSubviews {
             messagesStackView.removeArrangedSubview(subview)
             subview.removeFromSuperview()

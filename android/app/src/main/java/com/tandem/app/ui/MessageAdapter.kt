@@ -7,14 +7,15 @@ import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.RecyclerView
 import com.tandem.app.R
 import com.tandem.app.ble.DeliveryStatus
-import com.tandem.app.ble.SentMessageRecord
+import com.tandem.app.ble.MessageDirection
+import com.tandem.app.ble.MessageRecord
 import com.tandem.app.databinding.ItemMessageBinding
 
 class MessageAdapter : RecyclerView.Adapter<MessageAdapter.MessageViewHolder>() {
 
-    private val messages = ArrayList<SentMessageRecord>()
+    private val messages = ArrayList<MessageRecord>()
 
-    fun addMessage(record: SentMessageRecord) {
+    fun addMessage(record: MessageRecord) {
         messages.add(0, record)
         notifyItemInserted(0)
     }
@@ -42,23 +43,34 @@ class MessageAdapter : RecyclerView.Adapter<MessageAdapter.MessageViewHolder>() 
     inner class MessageViewHolder(private val binding: ItemMessageBinding) :
         RecyclerView.ViewHolder(binding.root) {
 
-        fun bind(item: SentMessageRecord) {
+        fun bind(item: MessageRecord) {
             binding.tvMessagePayload.text = item.text
             binding.tvMessageTimestamp.text = item.timestamp
             binding.tvMessageId.text = item.messageId.take(12)
 
-            when (item.status) {
-                DeliveryStatus.DELIVERED -> {
-                    binding.tvDeliveryBadge.text = "Delivered (Ack 200)"
-                    binding.tvDeliveryBadge.setTextColor(ContextCompat.getColor(binding.root.context, R.color.accent_success))
-                }
-                DeliveryStatus.PENDING -> {
-                    binding.tvDeliveryBadge.text = "Sending..."
-                    binding.tvDeliveryBadge.setTextColor(ContextCompat.getColor(binding.root.context, R.color.accent_warning))
-                }
-                DeliveryStatus.FAILED -> {
-                    binding.tvDeliveryBadge.text = if (item.statusDetail.isNotBlank()) "Failed: ${item.statusDetail}" else "Failed"
-                    binding.tvDeliveryBadge.setTextColor(ContextCompat.getColor(binding.root.context, R.color.accent_error))
+            if (item.direction == MessageDirection.INCOMING) {
+                binding.tvSenderBadge.text = "MacBook (BLE)"
+                binding.tvSenderBadge.setTextColor(Color.parseColor("#60A5FA")) // Blue
+                binding.tvDeliveryBadge.text = "Received (Verified)"
+                binding.tvDeliveryBadge.setTextColor(Color.parseColor("#34D399")) // Emerald green
+                binding.cardMessageRoot.setBackgroundResource(R.drawable.bg_card)
+            } else {
+                binding.tvSenderBadge.text = "Tablet (You)"
+                binding.tvSenderBadge.setTextColor(Color.parseColor("#34D399")) // Emerald green
+                
+                when (item.status) {
+                    DeliveryStatus.DELIVERED -> {
+                        binding.tvDeliveryBadge.text = "Delivered (Ack 200)"
+                        binding.tvDeliveryBadge.setTextColor(ContextCompat.getColor(binding.root.context, R.color.accent_success))
+                    }
+                    DeliveryStatus.PENDING -> {
+                        binding.tvDeliveryBadge.text = "Sending..."
+                        binding.tvDeliveryBadge.setTextColor(ContextCompat.getColor(binding.root.context, R.color.accent_warning))
+                    }
+                    DeliveryStatus.FAILED -> {
+                        binding.tvDeliveryBadge.text = if (item.statusDetail.isNotBlank()) "Failed: ${item.statusDetail}" else "Failed"
+                        binding.tvDeliveryBadge.setTextColor(ContextCompat.getColor(binding.root.context, R.color.accent_error))
+                    }
                 }
             }
         }

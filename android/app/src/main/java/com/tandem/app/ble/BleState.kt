@@ -7,7 +7,8 @@ enum class BleConnectionState(val label: String) {
     SCANNING("Scanning for Mac..."),
     CONNECTING("Connecting to Mac..."),
     DISCOVERING_SERVICES("Negotiating MTU & Services..."),
-    CONNECTED_READY("Connected to Mac (Ready)"),
+    HANDSHAKE("Establishing E2EE Handshake..."),
+    CONNECTED_READY("Connected (E2EE Active)"),
     DISCONNECTED("Disconnected"),
     ERROR("Connection Error")
 }
@@ -25,10 +26,18 @@ enum class DeliveryStatus {
     FAILED
 }
 
-data class SentMessageRecord(
+enum class MessageDirection {
+    OUTGOING, // Sent by Android to Mac
+    INCOMING  // Received from Mac
+}
+
+data class MessageRecord(
     val messageId: String,
     val text: String,
     val timestamp: String,
-    var status: DeliveryStatus,
+    val direction: MessageDirection = MessageDirection.OUTGOING,
+    var status: DeliveryStatus = DeliveryStatus.PENDING,
     var statusDetail: String = ""
 )
+
+typealias SentMessageRecord = MessageRecord

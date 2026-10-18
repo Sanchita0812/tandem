@@ -69,6 +69,32 @@
                             android:text="Offline • BLE GATT Central (Android 10)"
                             android:textColor="@color/text_tertiary"
                             android:textSize="11sp" />
+
+                        <!-- E2EE Security Badge -->
+                        <LinearLayout
+                            android:id="@+id/layoutSecurityBadge"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:background="@drawable/bg_badge"
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal"
+                            android:paddingStart="8dp"
+                            android:paddingTop="3dp"
+                            android:paddingEnd="8dp"
+                            android:paddingBottom="3dp"
+                            android:visibility="gone">
+
+                            <TextView
+                                android:id="@+id/tvSecurityCode"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:fontFamily="monospace"
+                                android:text="🔒 E2EE Active • Code: 000-000"
+                                android:textColor="#34D399"
+                                android:textSize="11sp"
+                                android:textStyle="bold" />
+                        </LinearLayout>
                     </LinearLayout>
                 </LinearLayout>
 

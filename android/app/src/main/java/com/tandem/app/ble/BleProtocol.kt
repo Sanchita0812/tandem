@@ -15,8 +15,8 @@ object BleProtocol {
     val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
     const val TARGET_MAC_NAME = "TandemMac"
-    const val PROTOCOL_VERSION = 1
-    const val MAX_PAYLOAD_BYTES = 2048
+    const val PROTOCOL_VERSION = 2
+    const val MAX_PAYLOAD_BYTES = 4096
 
     const val MAGIC_SINGLE: Byte = 0xAA.toByte()
     const val MAGIC_MULTI: Byte = 0xAB.toByte()
@@ -34,6 +34,7 @@ data class TandemMessage(
     val type: String = "text",
     val messageId: String = UUID.randomUUID().toString(),
     val timestamp: String = BleProtocol.currentIsoTimestamp(),
+    val sender: String = "android",
     val payload: String
 ) {
     fun toJsonString(): String {
@@ -42,6 +43,7 @@ data class TandemMessage(
         obj.put("type", type)
         obj.put("message_id", messageId)
         obj.put("timestamp", timestamp)
+        obj.put("sender", sender)
         obj.put("payload", payload)
         return obj.toString()
     }
@@ -51,10 +53,11 @@ data class TandemMessage(
             return try {
                 val obj = JSONObject(jsonStr)
                 TandemMessage(
-                    version = obj.getInt("version"),
+                    version = obj.optInt("version", BleProtocol.PROTOCOL_VERSION),
                     type = obj.getString("type"),
                     messageId = obj.getString("message_id"),
                     timestamp = obj.getString("timestamp"),
+                    sender = obj.optString("sender", "android"),
                     payload = obj.getString("payload")
                 )
             } catch (e: Exception) {
@@ -65,19 +68,30 @@ data class TandemMessage(
 }
 
 data class TandemAck(
-    val version: Int,
-    val type: String,
+    val version: Int = BleProtocol.PROTOCOL_VERSION,
+    val type: String = "ack",
     val messageId: String,
     val status: String,
     val code: Int,
-    val error: String?
+    val error: String? = null
 ) {
+    fun toJsonString(): String {
+        val obj = JSONObject()
+        obj.put("version", version)
+        obj.put("type", type)
+        obj.put("message_id", messageId)
+        obj.put("status", status)
+        obj.put("code", code)
+        if (error != null) obj.put("error", error)
+        return obj.toString()
+    }
+
     companion object {
         fun fromJsonString(jsonStr: String): TandemAck? {
             return try {
                 val obj = JSONObject(jsonStr)
                 TandemAck(
-                    version = obj.optInt("version", 1),
+                    version = obj.optInt("version", BleProtocol.PROTOCOL_VERSION),
                     type = obj.optString("type", "ack"),
                     messageId = obj.getString("message_id"),
                     status = obj.getString("status"),

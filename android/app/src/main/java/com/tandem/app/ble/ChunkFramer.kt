@@ -2,8 +2,12 @@ package com.tandem.app.ble
 
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.ConcurrentHashMap
 
 object ChunkFramer {
+
+    private val incomingBuffers = ConcurrentHashMap<Long, MutableMap<Int, ByteArray>>()
+    private val bufferDeadlines = ConcurrentHashMap<Long, Long>()
 
     /**
      * Splits payload bytes into framed BLE chunks if payload exceeds maxChunkSize.
@@ -47,6 +51,72 @@ object ChunkFramer {
         }
 
         return chunks
+    }
+
+    /**
+     * Reassembles incoming notifications from Mac into a complete payload.
+     */
+    fun processIncomingPacket(packet: ByteArray): ByteArray? {
+        if (packet.isEmpty()) return null
+        val firstByte = packet[0]
+
+        // Direct JSON string (starts with '{')
+        if (firstByte == '{'.code.toByte()) {
+            return packet
+        }
+
+        // Single binary framed packet
+        if (firstByte == BleProtocol.MAGIC_SINGLE && packet.size > 11) {
+            val payload = ByteArray(packet.size - 11)
+            System.arraycopy(packet, 11, payload, 0, payload.size)
+            return payload
+        }
+
+        // Multi-chunk frame
+        if ((firstByte == BleProtocol.MAGIC_MULTI || firstByte == BleProtocol.MAGIC_FINAL) && packet.size >= 11) {
+            val seqIndex = packet[1].toInt() and 0xFF
+            val totalChunks = packet[2].toInt() and 0xFF
+            if (totalChunks <= 0 || totalChunks > 64 || seqIndex < 0 || seqIndex >= totalChunks) {
+                return null
+            }
+
+            val buffer = ByteBuffer.wrap(packet, 3, 8).order(ByteOrder.LITTLE_ENDIAN)
+            val hashValue = buffer.long
+            val chunkLen = packet.size - 11
+            val chunkData = ByteArray(chunkLen)
+            System.arraycopy(packet, 11, chunkData, 0, chunkLen)
+
+            // Purge expired buffers (5 second timeout)
+            val now = System.currentTimeMillis()
+            bufferDeadlines.entries.removeIf { it.value < now }
+            incomingBuffers.keys.retainAll(bufferDeadlines.keys)
+
+            val chunkMap = incomingBuffers.computeIfAbsent(hashValue) {
+                bufferDeadlines[hashValue] = now + 5000L
+                ConcurrentHashMap()
+            }
+            chunkMap[seqIndex] = chunkData
+
+            if (chunkMap.size == totalChunks) {
+                var totalBytes = 0
+                for (i in 0 until totalChunks) {
+                    totalBytes += chunkMap[i]?.size ?: 0
+                }
+                val fullPayload = ByteArray(totalBytes)
+                var destPos = 0
+                for (i in 0 until totalChunks) {
+                    val c = chunkMap[i] ?: return null
+                    System.arraycopy(c, 0, fullPayload, destPos, c.size)
+                    destPos += c.size
+                }
+                incomingBuffers.remove(hashValue)
+                bufferDeadlines.remove(hashValue)
+                return fullPayload
+            }
+            return null
+        }
+
+        return packet
     }
 
     private fun getHashBytes(messageId: String): ByteArray {

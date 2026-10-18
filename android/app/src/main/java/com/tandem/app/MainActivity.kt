@@ -21,6 +21,8 @@ import com.tandem.app.ble.BleConnectionState
 import com.tandem.app.ble.BleProtocol
 import com.tandem.app.ble.DeliveryStatus
 import com.tandem.app.ble.DiscoveredDevice
+import com.tandem.app.ble.MessageDirection
+import com.tandem.app.ble.MessageRecord
 import com.tandem.app.ble.SentMessageRecord
 import com.tandem.app.ble.TandemBleCentral
 import com.tandem.app.databinding.ActivityMainBinding
@@ -156,6 +158,11 @@ class MainActivity : AppCompatActivity() {
                     binding.btnScan.text = getString(R.string.btn_scan)
                     binding.layoutDiscoveredDevices.visibility = View.GONE
                 }
+                BleConnectionState.HANDSHAKE -> {
+                    binding.viewStatusDot.setBackgroundResource(R.drawable.dot_amber)
+                    binding.btnDisconnect.isEnabled = true
+                    binding.btnSend.isEnabled = false
+                }
                 BleConnectionState.SCANNING -> {
                     binding.viewStatusDot.setBackgroundResource(R.drawable.dot_amber)
                     binding.btnDisconnect.isEnabled = false
@@ -172,14 +179,40 @@ class MainActivity : AppCompatActivity() {
                     binding.btnDisconnect.isEnabled = false
                     binding.btnSend.isEnabled = false
                     binding.btnScan.text = getString(R.string.btn_scan)
+                    binding.layoutSecurityBadge.visibility = View.GONE
                 }
                 BleConnectionState.ERROR -> {
                     binding.viewStatusDot.setBackgroundResource(R.drawable.dot_red)
                     binding.btnDisconnect.isEnabled = false
                     binding.btnSend.isEnabled = false
                     binding.btnScan.text = getString(R.string.btn_scan)
+                    binding.layoutSecurityBadge.visibility = View.GONE
                 }
             }
+        }
+
+        bleCentral.onSecurityCodeGenerated = { sas ->
+            if (sas != null) {
+                binding.layoutSecurityBadge.visibility = View.VISIBLE
+                binding.tvSecurityCode.text = "🔒 E2EE Active (AES-256-GCM) • Code: $sas"
+            } else {
+                binding.layoutSecurityBadge.visibility = View.GONE
+            }
+        }
+
+        bleCentral.onMessageReceived = { msg ->
+            val timeStr = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
+            val record = MessageRecord(
+                messageId = msg.messageId,
+                text = msg.payload,
+                timestamp = timeStr,
+                direction = MessageDirection.INCOMING,
+                status = DeliveryStatus.DELIVERED
+            )
+            messageAdapter.addMessage(record)
+            binding.tvEmptyMessages.visibility = View.GONE
+            binding.rvMessagesFeed.visibility = View.VISIBLE
+            Toast.makeText(this, "Message from Mac received!", Toast.LENGTH_SHORT).show()
         }
 
         bleCentral.onDeviceDiscovered = { deviceItem ->

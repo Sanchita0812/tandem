@@ -75,8 +75,8 @@ captures/
 android/app/build/outputs/
 **/build/outputs/
 *.apk
-!Tandem-v0.1.apk
-!android/Tandem-v0.1.apk
+!Tandem*.apk
+!android/Tandem*.apk
 
 # ------------------------------------------------------------------------------
 # Editors & IDEs

@@ -9,14 +9,14 @@ import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
-import android.os.ParcelUuid
-import java.util.concurrent.ConcurrentHashMap
+import android.util.Base64
+import org.json.JSONObject
+import java.util.UUID
 import java.util.concurrent.ConcurrentLinkedQueue
 
 class TandemBleCentral(private val context: Context) {
@@ -36,6 +36,8 @@ class TandemBleCentral(private val context: Context) {
     // Callbacks for UI
     var onStateChanged: ((BleConnectionState, String) -> Unit)? = null
     var onDeviceDiscovered: ((DiscoveredDevice) -> Unit)? = null
+    var onMessageReceived: ((TandemMessage) -> Unit)? = null
+    var onSecurityCodeGenerated: ((String?) -> Unit)? = null
     var onLog: ((String) -> Unit)? = null
 
     // Outgoing write queue and pending ACKs
@@ -78,10 +80,8 @@ class TandemBleCentral(private val context: Context) {
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
-        // Scan without hardware filters so devices advertising in scan-response are not discarded by Android 10
         scanner.startScan(null, settings, scanCallback)
 
-        // Auto-stop scanning after 12 seconds
         mainHandler.postDelayed({
             if (isScanning) {
                 stopScanning()
@@ -128,7 +128,6 @@ class TandemBleCentral(private val context: Context) {
         log("Initiating GATT connection to ${device.name ?: device.address}...")
         updateState(BleConnectionState.CONNECTING, "Connecting to ${device.name ?: device.address}...")
 
-        // Direct connect via LE transport
         bluetoothGatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
     }
 
@@ -146,6 +145,8 @@ class TandemBleCentral(private val context: Context) {
             rxCharacteristic = null
             txCharacteristic = null
             negotiatedMtu = 23
+            TandemCrypto.resetKeypair()
+            mainHandler.post { onSecurityCodeGenerated?.invoke(null) }
             updateState(BleConnectionState.DISCONNECTED, "Disconnected")
             log("GATT connection closed.")
         } catch (e: Exception) {
@@ -167,7 +168,6 @@ class TandemBleCentral(private val context: Context) {
                 log("Connected to GATT Server! Requesting MTU 512 & Priority High...")
                 updateState(BleConnectionState.DISCOVERING_SERVICES, "Connected; requesting MTU 512...")
                 gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
-                // Request MTU up to 512
                 gatt.requestMtu(512)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 log("Disconnected from GATT Server.")
@@ -215,8 +215,8 @@ class TandemBleCentral(private val context: Context) {
 
         override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS && descriptor.uuid == BleProtocol.CCCD_UUID) {
-                log("Successfully subscribed to Tx characteristic notifications!")
-                updateState(BleConnectionState.CONNECTED_READY, "Ready to send messages")
+                log("Successfully subscribed to Tx characteristic notifications! Initiating E2EE handshake...")
+                initiateHandshake()
             } else {
                 log("Failed to write CCCD descriptor: status $status")
             }
@@ -225,8 +225,7 @@ class TandemBleCentral(private val context: Context) {
         override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
             isWriting = false
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                log("Chunk write acknowledged by peripheral.")
-                // Send next chunk in queue if any
+                // Chunk successfully written, send next chunk in queue
                 processNextWrite()
             } else {
                 log("Characteristic write failed with status: $status")
@@ -238,10 +237,10 @@ class TandemBleCentral(private val context: Context) {
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             if (characteristic.uuid == BleProtocol.TX_CHAR_UUID) {
-                val data = characteristic.value ?: return
-                val ackJson = String(data, Charsets.UTF_8)
-                log("Received Tx Notification: $ackJson")
-                handleAckNotification(ackJson)
+                val rawData = characteristic.value ?: return
+                val deframed = ChunkFramer.processIncomingPacket(rawData) ?: return
+                val jsonStr = String(deframed, Charsets.UTF_8)
+                handleInboundNotification(jsonStr)
             }
         }
     }
@@ -253,12 +252,110 @@ class TandemBleCentral(private val context: Context) {
             descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
             gatt.writeDescriptor(descriptor)
         } else {
-            log("CCCD descriptor not found on Tx characteristic; proceeding.")
-            updateState(BleConnectionState.CONNECTED_READY, "Ready (without CCCD)")
+            log("CCCD descriptor not found on Tx characteristic; initiating handshake directly.")
+            initiateHandshake()
         }
     }
 
-    // MARK: - Message Transmission
+    // MARK: - E2EE Handshake & Inbound Processing
+
+    private fun initiateHandshake() {
+        updateState(BleConnectionState.HANDSHAKE, "Exchanging ECDH P-256 keys with Mac...")
+        TandemCrypto.resetKeypair()
+        val pubBytes = TandemCrypto.getLocalRawPublicKey()
+        if (pubBytes == null) {
+            log("Failed to generate local EC keypair")
+            updateState(BleConnectionState.ERROR, "Crypto initialization failed")
+            return
+        }
+
+        val hsMsg = TandemMessage(
+            version = BleProtocol.PROTOCOL_VERSION,
+            type = "handshake",
+            messageId = "hs-cli-" + UUID.randomUUID().toString().take(8),
+            sender = "android",
+            payload = Base64.encodeToString(pubBytes, Base64.NO_WRAP)
+        )
+
+        val payloadBytes = hsMsg.toJsonString().toByteArray(Charsets.UTF_8)
+        val maxChunkCapacity = (negotiatedMtu - 3).coerceAtLeast(20)
+        val chunks = ChunkFramer.framePayload(payloadBytes, hsMsg.messageId, maxChunkCapacity)
+
+        log("Dispatching E2EE Handshake request to Mac (${chunks.size} chunks)...")
+        writeQueue.addAll(chunks)
+        processNextWrite()
+    }
+
+    private fun handleInboundNotification(jsonStr: String) {
+        try {
+            val obj = JSONObject(jsonStr)
+            val type = obj.optString("type")
+
+            when (type) {
+                "handshake_ack" -> {
+                    val serverPubB64 = obj.getString("payload")
+                    val serverPubBytes = Base64.decode(serverPubB64, Base64.DEFAULT)
+                    val sas = TandemCrypto.completeKeyExchange(serverPubBytes)
+                    log("🔒 E2EE Handshake completed! Shared AES-256-GCM session active. Security Code: $sas")
+                    mainHandler.post {
+                        onSecurityCodeGenerated?.invoke(sas)
+                        updateState(BleConnectionState.CONNECTED_READY, "Ready • E2EE Active (Code: $sas)")
+                    }
+                }
+                "ack" -> {
+                    handleAckNotification(jsonStr)
+                }
+                "encrypted" -> {
+                    if (!TandemCrypto.isEncrypted) {
+                        log("SECURITY REJECT: Received encrypted message before handshake established")
+                        return
+                    }
+                    val ciphertextB64 = obj.getString("payload")
+                    val decryptedJson = TandemCrypto.decrypt(ciphertextB64)
+                    val innerMsg = TandemMessage.fromJsonString(decryptedJson)
+                    if (innerMsg != null) {
+                        log("🔒 Valid Encrypted Message Received from Mac: '${innerMsg.payload}'")
+                        mainHandler.post {
+                            onMessageReceived?.invoke(innerMsg)
+                        }
+                        sendDirectAck(innerMsg.messageId)
+                    }
+                }
+                "text" -> {
+                    val msg = TandemMessage.fromJsonString(jsonStr)
+                    if (msg != null) {
+                        log("Received Message from Mac: '${msg.payload}'")
+                        mainHandler.post {
+                            onMessageReceived?.invoke(msg)
+                        }
+                        sendDirectAck(msg.messageId)
+                    }
+                }
+                else -> {
+                    if (obj.has("status") && obj.has("code")) {
+                        handleAckNotification(jsonStr)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            log("Error handling inbound notification: ${e.message}")
+        }
+    }
+
+    private fun sendDirectAck(messageId: String) {
+        val ack = TandemAck(
+            messageId = messageId,
+            status = "delivered",
+            code = 200
+        )
+        val ackBytes = ack.toJsonString().toByteArray(Charsets.UTF_8)
+        val maxChunkCapacity = (negotiatedMtu - 3).coerceAtLeast(20)
+        val chunks = ChunkFramer.framePayload(ackBytes, messageId, maxChunkCapacity)
+        writeQueue.addAll(chunks)
+        processNextWrite()
+    }
+
+    // MARK: - Outgoing Message Transmission
 
     fun sendMessage(text: String, onResult: (Boolean, String) -> Unit) {
         val gatt = bluetoothGatt
@@ -268,33 +365,61 @@ class TandemBleCentral(private val context: Context) {
             return
         }
 
-        if (text.isBlank()) {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) {
             onResult(false, "Cannot send empty message")
             return
         }
 
-        val tandemMsg = TandemMessage(payload = text)
-        val jsonPayload = tandemMsg.toJsonString().toByteArray(Charsets.UTF_8)
+        val msgId = "msg-" + UUID.randomUUID().toString().take(12)
+        val timestamp = BleProtocol.currentIsoTimestamp()
 
+        val envelope: TandemMessage
+        if (TandemCrypto.isEncrypted) {
+            val innerMsg = TandemMessage(
+                version = BleProtocol.PROTOCOL_VERSION,
+                type = "text",
+                messageId = msgId,
+                timestamp = timestamp,
+                sender = "android",
+                payload = trimmed
+            )
+            val ciphertext = TandemCrypto.encrypt(innerMsg.toJsonString())
+            envelope = TandemMessage(
+                version = BleProtocol.PROTOCOL_VERSION,
+                type = "encrypted",
+                messageId = msgId,
+                timestamp = timestamp,
+                sender = "android",
+                payload = ciphertext
+            )
+        } else {
+            envelope = TandemMessage(
+                version = BleProtocol.PROTOCOL_VERSION,
+                type = "text",
+                messageId = msgId,
+                timestamp = timestamp,
+                sender = "android",
+                payload = trimmed
+            )
+        }
+
+        val jsonPayload = envelope.toJsonString().toByteArray(Charsets.UTF_8)
         if (jsonPayload.size > BleProtocol.MAX_PAYLOAD_BYTES) {
-            onResult(false, "Message exceeds 2048 bytes limit")
+            onResult(false, "Message exceeds ${BleProtocol.MAX_PAYLOAD_BYTES} bytes limit")
             return
         }
 
-        pendingMessageId = tandemMsg.messageId
+        pendingMessageId = msgId
         pendingSendCallback = onResult
 
-        // Calculate max chunk payload size based on negotiated MTU
         val maxChunkCapacity = (negotiatedMtu - 3).coerceAtLeast(20)
-        val chunks = ChunkFramer.framePayload(jsonPayload, tandemMsg.messageId, maxChunkCapacity)
+        val chunks = ChunkFramer.framePayload(jsonPayload, msgId, maxChunkCapacity)
 
-        log("Enqueueing message ${tandemMsg.messageId} (${jsonPayload.size} bytes across ${chunks.size} chunks)...")
+        log("Enqueueing message $msgId (${jsonPayload.size} bytes across ${chunks.size} chunks)...")
         writeQueue.addAll(chunks)
 
-        // Set 5.0 second delivery ACK timeout
         startAckTimeout()
-
-        // Begin sending
         processNextWrite()
     }
 
@@ -312,9 +437,9 @@ class TandemBleCentral(private val context: Context) {
         val initiated = gatt.writeCharacteristic(rxChar)
         if (!initiated) {
             isWriting = false
-            log("Failed to initiate characteristic write!")
+            log("Failed to initiate characteristic write on BLE stack!")
             cancelAckTimeout()
-            pendingSendCallback?.invoke(false, "Failed to initiate write on Bluetooth stack")
+            pendingSendCallback?.invoke(false, "Write failed on BLE stack")
             pendingSendCallback = null
         }
     }
