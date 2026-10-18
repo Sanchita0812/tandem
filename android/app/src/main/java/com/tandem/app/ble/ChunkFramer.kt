@@ -91,6 +91,11 @@ object ChunkFramer {
             bufferDeadlines.entries.removeIf { it.value < now }
             incomingBuffers.keys.retainAll(bufferDeadlines.keys)
 
+            if (!incomingBuffers.containsKey(hashValue) && incomingBuffers.size >= 16) {
+                // Drop chunk stream if 16 concurrent pending streams already active (DoS defense)
+                return null
+            }
+
             val chunkMap = incomingBuffers.computeIfAbsent(hashValue) {
                 bufferDeadlines[hashValue] = now + 5000L
                 ConcurrentHashMap()
@@ -101,6 +106,11 @@ object ChunkFramer {
                 var totalBytes = 0
                 for (i in 0 until totalChunks) {
                     totalBytes += chunkMap[i]?.size ?: 0
+                }
+                if (totalBytes > BleProtocol.MAX_PAYLOAD_BYTES) {
+                    incomingBuffers.remove(hashValue)
+                    bufferDeadlines.remove(hashValue)
+                    return null
                 }
                 val fullPayload = ByteArray(totalBytes)
                 var destPos = 0

@@ -527,7 +527,7 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
             
             if isDuplicateOrReplay(innerMsg) { return }
             
-            log("🔒 VALID ENCRYPTED MESSAGE RECEIVED: id=\(innerMsg.message_id), text='\(innerMsg.payload)'")
+            log("🔒 VALID ENCRYPTED MESSAGE RECEIVED: id=\(innerMsg.message_id), bytes=\(innerMsg.payload.utf8.count)")
             onMessageReceived?(innerMsg)
             sendAck(messageId: innerMsg.message_id, status: "delivered", code: 200, error: nil)
             
@@ -538,6 +538,12 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
     }
     
     private func handlePlaintextMessage(_ message: TandemMessage, from central: CBCentral) {
+        guard !TandemCrypto.shared.isEncrypted else {
+            log("SECURITY REJECT: Received unencrypted plaintext message while E2EE session is active.")
+            sendAck(messageId: message.message_id, status: "error", code: 403, error: "Plaintext rejected: E2EE session is active")
+            return
+        }
+        
         if isDuplicateOrReplay(message) { return }
         
         log("VALID PLAINTEXT MESSAGE RECEIVED: id=\(message.message_id), bytes=\(message.payload.count)")

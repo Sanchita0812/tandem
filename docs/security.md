@@ -99,11 +99,15 @@ However, operating over **unencrypted 2.4 GHz broadcast radio** without operatin
   1. **Anti-Replay Drift Window:** The receiver inspects `message.timestamp`. Any message whose timestamp deviates by more than 10 minutes (600 seconds) from the Mac system clock is rejected with HTTP 400.
   2. **Circular Deduplication Cache:** A sliding FIFO cache of the last 64 unique `message_id` values suppresses duplicate processing and returns an idempotent ACK 200 without duplicating UI cards.
 
-#### Finding 4: Characteristic Access Control & Permissions
-- **Status in v0.1:** `rxCharacteristic` is configured with `.writeable` permissions without requiring OS-level BLE encryption/bonding (`CBAttributePermissionsWriteEncryptionRequired`).
-- **Risk:** Any BLE Central within range that discovers the characteristic can write data to it.
-- **Mitigation in v0.1:** Strict payload parsing (JSON validation, length limits, timestamp checks).
-- **Roadmap for v0.2:** Require OS-level pairing and encryption.
+#### Finding 4: Encryption Downgrade Attack Prevention — DEFENDED
+- **Mechanism:** When an E2EE session is active, an in-range adversary might attempt to inject unencrypted cleartext `"text"` packets.
+- **Defenses Implemented in `BlePeripheralManager.swift`:**
+  Incoming plaintext messages are strictly rejected with HTTP 403 (`"Plaintext rejected: E2EE session is active"`) whenever `TandemCrypto.shared.isEncrypted` is true.
+
+#### Finding 5: Zero-Payload Diagnostic Logging Enforcement — RESOLVED
+- **Vulnerability:** Decrypted message strings were previously interpolated into `log(...)` statements, writing sensitive cleartext to `NSLog` and the macOS UI log pane.
+- **Defensive Fix Implemented:**
+  Replaced message text interpolation with metadata only (message ID and byte length). No plaintext payload data is ever logged to system consoles or UI logs.
 
 ---
 
@@ -130,24 +134,41 @@ However, operating over **unencrypted 2.4 GHz broadcast radio** without operatin
 - **Analysis:** This was intentionally designed to resolve a known Android 10 bug where peripherals advertising 128-bit UUIDs in the scan response packet are silently dropped by hardware filters.
 - **Defensive Safeguard:** The application sorts matching `TandemMac` devices to the top of the UI list, displays RSSI and MAC addresses, and only connects upon explicit user tap.
 
+#### Finding 5: Anti-Replay and Circular Deduplication Cache — DEFENDED
+- **Mechanism:** Malicious retransmissions or RF replays of previously captured frames could trigger duplicate UI actions.
+- **Defenses Implemented in `TandemBleCentral.kt`:**
+  1. `isDuplicateOrReplay`: Checks UTC timestamps against a 10-minute anti-drift window.
+  2. Circular FIFO deduplication cache tracking the last 64 `messageId` entries. Duplicate messages receive an immediate delivery ACK without invoking duplicate UI callbacks.
+  3. Cache is cleared upon `disconnect()`.
+
+#### Finding 6: Chunk Reassembly Flood Protection — DEFENDED
+- **Defenses Implemented in `ChunkFramer.kt`:**
+  1. Maximum 16 concurrent pending chunk streams (`incomingBuffers.size >= 16`). Additional streams are dropped to prevent heap exhaustion.
+  2. Streams exceeding `BleProtocol.MAX_PAYLOAD_BYTES` (4096 bytes) are immediately aborted and purged.
+  3. Incomplete streams are evicted after a 5.0-second deadline.
+
+#### Finding 7: Downgrade Prevention & Zero-Payload Logging on Android — RESOLVED
+- **Defenses Implemented in `TandemBleCentral.kt`:**
+  1. Plaintext `"text"` frames are dropped when `TandemCrypto.isEncrypted` is active.
+  2. Cleartext message content is stripped from `log(...)` statements, ensuring `logcat` never records message text.
+
 ---
 
 ## 5. Security Recommendations for End Users
 
-1. **Physical Environment Awareness:**
-   - In shared or untrusted spaces (airports, conferences), do not transmit confidential credentials, passwords, or private keys over Tandem v0.1.
-   - Use the **Restart / Stop Advertising** control in the macOS helper when not actively transferring data.
+1. **Short Authentication String (SAS) Verification:**
+   - Always visually verify that the 6-digit security code (e.g., `123-456`) displayed in the green badge matches on both the MacBook and the Android tablet. This mathematically guarantees the absence of an active Man-in-the-Middle (MitM) attacker.
 2. **Bluetooth Hygiene:**
    - Turn Bluetooth OFF on both devices when not in use.
-   - Ensure system software updates on both macOS and Android are kept current.
+   - Use the **Restart / Stop Advertising** button in the macOS helper when finished transferring messages.
 3. **No Shell Automation:**
    - Never pipe Tandem incoming messages into automated scripts that execute shell commands.
 
 ---
 
-## 6. Cryptographic Roadmap for Tandem v0.2
+## 6. Cryptographic Implementation (Tandem v0.2)
 
-To transition Tandem from a local prototype to an enterprise-grade secure bridge, the following cryptographic architecture is planned for v0.2:
+The v0.2 cryptographic architecture is fully operational:
 
 ```
 +-------------------------------------------------------------------------------------------------+
@@ -155,11 +176,11 @@ To transition Tandem from a local prototype to an enterprise-grade secure bridge
 |                                                                                                 |
 |   Lenovo Tab M10                                                           MacBook              |
 |   +-----------------------+                                       +-----------------------+     |
-|   | 1. Generate Ephemeral |                                       | 1. Generate Ephemeral |     |
-|   |    X25519 Keypair     |                                       |    X25519 Keypair     |     |
-|   |                       |====== Handshake (Public Keys) =======>|                       |     |
+|   | 1. Ephemeral NIST     |                                       | 1. Ephemeral NIST     |     |
+|   |    P-256 Keypair      |                                       |    P-256 Keypair      |     |
+|   |                       |====== Handshake (Raw Public Key) ====>|                       |     |
 |   | 2. Compute Shared     |                                       | 2. Compute Shared     |     |
-|   |    Secret via ECDH    |<===== Handshake (Public Keys) ========|    Secret via ECDH    |     |
+|   |    Secret via ECDH    |<===== Handshake Ack (Public Key) =====|    Secret via ECDH    |     |
 |   |                       |                                       |                       |     |
 |   | 3. Derive Session Key |                                       | 3. Derive Session Key |     |
 |   |    via HKDF-SHA256    |                                       |    via HKDF-SHA256    |     |
@@ -173,8 +194,9 @@ To transition Tandem from a local prototype to an enterprise-grade secure bridge
 +-------------------------------------------------------------------------------------------------+
 ```
 
-### Components of v0.2:
-1. **Asymmetric Key Agreement (X25519):** Ephemeral-Static Diffie-Hellman key exchange over the BLE handshake.
-2. **Authenticated Encryption (AES-256-GCM / ChaCha20-Poly1305):** Every message payload and chunk encrypted with a 256-bit session key and 96-bit unique nonce (IV).
-3. **Out-of-Band (OOB) Authentication:** Short Authentication String (SAS) or QR-code scan to guarantee protection against Man-in-the-Middle (MitM) attacks.
-4. **OS-Level BLE Bonding:** Enable `CBAttributePermissionsWriteEncryptionRequired` on macOS CoreBluetooth, enforcing hardware-encrypted Bluetooth pairing.
+### Cryptographic Primitives:
+1. **Asymmetric Key Agreement (ECDH P-256 / secp256r1):** Ephemeral keypairs generated per session using OS CSPRNG (`SecRandomCopyBytes` / `SecureRandom`). Keys are destroyed on disconnect.
+2. **Key Derivation (HKDF-SHA256):** RFC 5869 extract-and-expand with domain separation (`salt = "Tandem-v0.2-Salt"`, `info = "AES-256-GCM"`), producing a 256-bit symmetric key.
+3. **Authenticated Encryption (AES-256-GCM):** 96-bit (12-byte) unique random IV per message, with 128-bit authentication tag ensuring confidentiality and integrity against tampering.
+4. **Out-of-Band (OOB) Authentication (SAS Code):** Lexicographically ordered SHA-256 hash of public keys produces an identical 6-digit code (`XXX-XXX`) displayed on both screens for MitM detection.
+5. **Session Lifecycle:** Disconnection immediately triggers `TandemCrypto.resetKeypair()`, zeroing out session keys on both peers.

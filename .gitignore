@@ -32,16 +32,20 @@ Package.pins
 xcuserdata/
 DerivedData/
 
-# Transient macOS Build Artifacts (Keep bundled pre-built TandemMac.app)
-macos/build/*.dSYM
-macos/build/*.zip
-macos/build/*.tar.gz
+# macOS Build Artifacts & Crash Dumps
+macos/build/
+*.dSYM/
+*.dSYM
+*.ips
+*.crash
 
 # ------------------------------------------------------------------------------
 # Android & Gradle Build Artifacts
 # ------------------------------------------------------------------------------
 .gradle/
 android/.gradle/
+.kotlin/
+android/.kotlin/
 build/
 android/build/
 android/app/build/
@@ -70,8 +74,9 @@ captures/
 *.class
 *.dex
 *.ap_
+*.aar
 
-# Output APKs (Ignore transient build outputs, retain pre-built release APKs)
+# Output APKs (Ignore transient build outputs, retain standalone pre-built APKs)
 android/app/build/outputs/
 **/build/outputs/
 *.apk
@@ -79,9 +84,20 @@ android/app/build/outputs/
 !android/Tandem*.apk
 
 # ------------------------------------------------------------------------------
+# Secrets & Environment Files
+# ------------------------------------------------------------------------------
+.env
+.env.*
+*.env
+*.env.local
+
+# ------------------------------------------------------------------------------
 # Editors & IDEs
 # ------------------------------------------------------------------------------
 .vscode/
+.settings/
+.project
+.classpath
 *.swp
 *.swo
 *~

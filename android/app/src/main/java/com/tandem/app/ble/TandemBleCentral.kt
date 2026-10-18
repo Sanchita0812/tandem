@@ -47,6 +47,10 @@ class TandemBleCentral(private val context: Context) {
     private var pendingMessageId: String? = null
     private var ackTimeoutRunnable: Runnable? = null
 
+    // Anti-replay and deduplication cache (SEC-04 / SEC-07)
+    private val recentMessageIds = java.util.Collections.synchronizedList(mutableListOf<String>())
+    private val maxRecentIds = 64
+
     val isBluetoothEnabled: Boolean
         get() = bluetoothAdapter?.isEnabled == true
 
@@ -146,6 +150,7 @@ class TandemBleCentral(private val context: Context) {
             txCharacteristic = null
             negotiatedMtu = 23
             TandemCrypto.resetKeypair()
+            recentMessageIds.clear()
             mainHandler.post { onSecurityCodeGenerated?.invoke(null) }
             updateState(BleConnectionState.DISCONNECTED, "Disconnected")
             log("GATT connection closed.")
@@ -315,7 +320,11 @@ class TandemBleCentral(private val context: Context) {
                     val decryptedJson = TandemCrypto.decrypt(ciphertextB64)
                     val innerMsg = TandemMessage.fromJsonString(decryptedJson)
                     if (innerMsg != null) {
-                        log("🔒 Valid Encrypted Message Received from Mac: '${innerMsg.payload}'")
+                        if (isDuplicateOrReplay(innerMsg)) {
+                            sendDirectAck(innerMsg.messageId)
+                            return
+                        }
+                        log("🔒 Valid Encrypted Message Received from Mac: id=${innerMsg.messageId}, bytes=${innerMsg.payload.toByteArray().size}")
                         mainHandler.post {
                             onMessageReceived?.invoke(innerMsg)
                         }
@@ -323,9 +332,17 @@ class TandemBleCentral(private val context: Context) {
                     }
                 }
                 "text" -> {
+                    if (TandemCrypto.isEncrypted) {
+                        log("SECURITY REJECT: Received unencrypted plaintext message while E2EE session is active.")
+                        return
+                    }
                     val msg = TandemMessage.fromJsonString(jsonStr)
                     if (msg != null) {
-                        log("Received Message from Mac: '${msg.payload}'")
+                        if (isDuplicateOrReplay(msg)) {
+                            sendDirectAck(msg.messageId)
+                            return
+                        }
+                        log("Valid Message Received from Mac: id=${msg.messageId}, bytes=${msg.payload.toByteArray().size}")
                         mainHandler.post {
                             onMessageReceived?.invoke(msg)
                         }
@@ -341,6 +358,34 @@ class TandemBleCentral(private val context: Context) {
         } catch (e: Exception) {
             log("Error handling inbound notification: ${e.message}")
         }
+    }
+
+    private fun isDuplicateOrReplay(msg: TandemMessage): Boolean {
+        try {
+            val sdf = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US)
+            sdf.timeZone = java.util.TimeZone.getTimeZone("UTC")
+            val cleanTimestamp = msg.timestamp.substringBefore('.').substringBefore('Z')
+            val msgDate = sdf.parse(cleanTimestamp)
+            if (msgDate != null) {
+                val drift = Math.abs(System.currentTimeMillis() - msgDate.time)
+                if (drift > 600_000L) {
+                    log("SECURITY REJECT: Message timestamp drift ${drift / 1000}s exceeds 10-minute anti-replay window.")
+                    return true
+                }
+            }
+        } catch (_: Exception) {}
+
+        synchronized(recentMessageIds) {
+            if (recentMessageIds.contains(msg.messageId)) {
+                log("Ignoring duplicate messageId: ${msg.messageId}")
+                return true
+            }
+            recentMessageIds.add(msg.messageId)
+            if (recentMessageIds.size > maxRecentIds) {
+                recentMessageIds.removeAt(0)
+            }
+        }
+        return false
     }
 
     private fun sendDirectAck(messageId: String) {
