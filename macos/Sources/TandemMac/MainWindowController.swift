@@ -524,25 +524,28 @@ public class MainWindowController: NSWindowController, NSTextFieldDelegate {
         sendButton.isEnabled = false
         sendStatusLabel.stringValue = "Encrypting & dispatching chunks..."
         
+        let messageId = "mac-" + UUID().uuidString.prefix(8).lowercased()
         let localMsg = TandemMessage(
             version: BleProtocol.protocolVersion,
             type: "text",
+            message_id: messageId,
+            timestamp: ISO8601DateFormatter().string(from: Date()),
             sender: "mac",
             payload: text
         )
         addMessageCard(localMsg, isOutgoing: true)
         
-        BlePeripheralManager.shared.sendMessage(text: text) { [weak self] success, detail in
+        BlePeripheralManager.shared.sendMessage(text: text, messageId: messageId) { [weak self] success, detail in
             DispatchQueue.main.async {
                 self?.sendButton.isEnabled = true
                 if success {
                     self?.sendStatusLabel.stringValue = "Delivered to Android (Ack 200)"
                     self?.sendStatusLabel.textColor = NSColor(red: 0.3, green: 0.85, blue: 0.5, alpha: 1.0)
-                    self?.updateDeliveryStatus(messageId: localMsg.message_id, status: "Delivered (Ack 200)")
+                    self?.updateDeliveryStatus(messageId: messageId, status: "Delivered (Ack 200)")
                 } else {
                     self?.sendStatusLabel.stringValue = "Delivery failed: \(detail)"
                     self?.sendStatusLabel.textColor = NSColor.systemRed
-                    self?.updateDeliveryStatus(messageId: localMsg.message_id, status: "Failed: \(detail)")
+                    self?.updateDeliveryStatus(messageId: messageId, status: "Failed: \(detail)")
                 }
             }
         }

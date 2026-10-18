@@ -223,15 +223,16 @@ class TandemBleCentral(private val context: Context) {
         }
 
         override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
-            isWriting = false
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                // Chunk successfully written, send next chunk in queue
-                processNextWrite()
-            } else {
-                log("Characteristic write failed with status: $status")
-                cancelAckTimeout()
-                pendingSendCallback?.invoke(false, "Write failed with status $status")
-                pendingSendCallback = null
+            mainHandler.post {
+                isWriting = false
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    processNextWrite()
+                } else {
+                    log("Characteristic write failed with status: $status")
+                    cancelAckTimeout()
+                    pendingSendCallback?.invoke(false, "Write failed with status $status")
+                    pendingSendCallback = null
+                }
             }
         }
 
@@ -351,6 +352,7 @@ class TandemBleCentral(private val context: Context) {
         val ackBytes = ack.toJsonString().toByteArray(Charsets.UTF_8)
         val maxChunkCapacity = (negotiatedMtu - 3).coerceAtLeast(20)
         val chunks = ChunkFramer.framePayload(ackBytes, messageId, maxChunkCapacity)
+        log("Sending delivery ACK to Mac for message: $messageId (${chunks.size} chunks)")
         writeQueue.addAll(chunks)
         processNextWrite()
     }
@@ -424,23 +426,25 @@ class TandemBleCentral(private val context: Context) {
     }
 
     private fun processNextWrite() {
-        if (isWriting) return
-        val chunk = writeQueue.poll() ?: return
+        mainHandler.post {
+            if (isWriting) return@post
+            val chunk = writeQueue.poll() ?: return@post
 
-        val gatt = bluetoothGatt ?: return
-        val rxChar = rxCharacteristic ?: return
+            val gatt = bluetoothGatt ?: return@post
+            val rxChar = rxCharacteristic ?: return@post
 
-        isWriting = true
-        rxChar.value = chunk
-        rxChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            isWriting = true
+            rxChar.value = chunk
+            rxChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
 
-        val initiated = gatt.writeCharacteristic(rxChar)
-        if (!initiated) {
-            isWriting = false
-            log("Failed to initiate characteristic write on BLE stack!")
-            cancelAckTimeout()
-            pendingSendCallback?.invoke(false, "Write failed on BLE stack")
-            pendingSendCallback = null
+            val initiated = gatt.writeCharacteristic(rxChar)
+            if (!initiated) {
+                isWriting = false
+                log("Failed to initiate characteristic write on BLE stack!")
+                cancelAckTimeout()
+                pendingSendCallback?.invoke(false, "Write failed on BLE stack")
+                pendingSendCallback = null
+            }
         }
     }
 

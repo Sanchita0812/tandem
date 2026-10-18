@@ -232,8 +232,8 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
     
     // MARK: - Outgoing Message Transmission (Mac -> Android)
     
-    public func sendMessage(text: String, completion: @escaping (Bool, String) -> Void) {
-        guard !connectedCentrals.isEmpty, let txChar = txCharacteristic else {
+    public func sendMessage(text: String, messageId: String? = nil, completion: @escaping (Bool, String) -> Void) {
+        guard !connectedCentrals.isEmpty, txCharacteristic != nil else {
             completion(false, "Android tablet is not connected")
             return
         }
@@ -244,7 +244,7 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
             return
         }
         
-        let messageId = "mac-" + UUID().uuidString.prefix(8).lowercased()
+        let messageId = messageId ?? ("mac-" + UUID().uuidString.prefix(8).lowercased())
         let timestamp = ISO8601DateFormatter().string(from: Date())
         
         var envelope: TandemMessage
@@ -421,18 +421,30 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
         }
         
         let decoder = JSONDecoder()
+        
+        // 1. Check if it's an ACK envelope first
+        if let ack = try? decoder.decode(TandemAck.self, from: data), ack.type == "ack" {
+            handleInboundAck(ack)
+            return
+        }
+        
+        // Also check raw JSON dictionary in case ACK structure differs
+        if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let type = obj["type"] as? String, type == "ack" {
+            let msgId = obj["message_id"] as? String ?? obj["messageId"] as? String ?? ""
+            let status = obj["status"] as? String ?? "delivered"
+            let code = obj["code"] as? Int ?? 200
+            let ack = TandemAck(message_id: msgId, status: status, code: code, error: nil)
+            handleInboundAck(ack)
+            return
+        }
+        
         do {
             let message = try decoder.decode(TandemMessage.self, from: data)
             
-            // 1. Handle Key Agreement Handshake Request
+            // 2. Handle Key Agreement Handshake Request
             if message.type == "handshake" {
                 handleHandshakeRequest(message, from: central)
-                return
-            }
-            
-            // 2. Handle Delivery ACK from Android (for messages Mac sent)
-            if message.type == "ack" {
-                handleInboundAck(message)
                 return
             }
             
@@ -486,15 +498,15 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
         }
     }
     
-    private func handleInboundAck(_ message: TandemMessage) {
-        log("Received Delivery ACK from Android for message: \(message.message_id)")
-        if message.message_id == pendingOutboundId {
+    private func handleInboundAck(_ ack: TandemAck) {
+        log("Received Delivery ACK from Android for message: \(ack.message_id) (status=\(ack.status), code=\(ack.code))")
+        if ack.message_id == pendingOutboundId {
             cancelAckTimeout()
             pendingOutboundCallback?(true, "Delivered (Ack 200)")
             pendingOutboundCallback = nil
             pendingOutboundId = nil
         }
-        onMessageDelivered?(message.message_id, "Delivered (Ack 200)")
+        onMessageDelivered?(ack.message_id, "Delivered (Ack 200)")
     }
     
     private func handleEncryptedMessage(_ message: TandemMessage, from central: CBCentral) {
