@@ -48,15 +48,16 @@ class MessageAdapter : RecyclerView.Adapter<MessageAdapter.MessageViewHolder>() 
             binding.tvMessageTimestamp.text = item.timestamp
             binding.tvMessageId.text = item.messageId.take(12)
 
+            val context = binding.root.context
             if (item.direction == MessageDirection.INCOMING) {
                 binding.tvSenderBadge.text = "MacBook (BLE)"
-                binding.tvSenderBadge.setTextColor(Color.parseColor("#60A5FA")) // Blue
+                binding.tvSenderBadge.setTextColor(ContextCompat.getColor(context, R.color.accent_primary_light))
                 binding.tvDeliveryBadge.text = "Received (Verified)"
-                binding.tvDeliveryBadge.setTextColor(Color.parseColor("#34D399")) // Emerald green
+                binding.tvDeliveryBadge.setTextColor(ContextCompat.getColor(context, R.color.accent_success))
                 binding.cardMessageRoot.setBackgroundResource(R.drawable.bg_card)
             } else {
                 binding.tvSenderBadge.text = "Tablet (You)"
-                binding.tvSenderBadge.setTextColor(Color.parseColor("#34D399")) // Emerald green
+                binding.tvSenderBadge.setTextColor(ContextCompat.getColor(context, R.color.accent_success))
                 
                 when (item.status) {
                     DeliveryStatus.DELIVERED -> {

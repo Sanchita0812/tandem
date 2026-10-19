@@ -14,12 +14,10 @@ echo "==> Building Tandem Android APK via Gradle..."
 OUTPUT_APK="$SCRIPT_DIR/app/build/outputs/apk/debug/app-debug.apk"
 V2_APK="$SCRIPT_DIR/Tandem-v0.2.apk"
 ROOT_V2_APK="$SCRIPT_DIR/../Tandem-v0.2.apk"
-ROOT_V1_APK="$SCRIPT_DIR/../Tandem-v0.1.apk"
 ROOT_EASY_APK="$SCRIPT_DIR/../Tandem.apk"
 
 cp "$OUTPUT_APK" "$V2_APK"
 cp "$OUTPUT_APK" "$ROOT_V2_APK"
-cp "$OUTPUT_APK" "$ROOT_V1_APK"
 cp "$OUTPUT_APK" "$ROOT_EASY_APK"
 
 echo "==> Build successful!"

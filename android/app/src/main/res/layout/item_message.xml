@@ -3,10 +3,10 @@
     android:id="@+id/cardMessageRoot"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:layout_marginBottom="10dp"
+    android:layout_marginBottom="8dp"
     android:background="@drawable/bg_card"
     android:orientation="vertical"
-    android:padding="12dp">
+    android:padding="14dp">
 
     <!-- Top meta row: sender badge + status badge + timestamp + ID -->
     <LinearLayout
@@ -21,12 +21,12 @@
             android:layout_height="wrap_content"
             android:background="@drawable/bg_badge"
             android:fontFamily="sans-serif-medium"
-            android:paddingStart="8dp"
+            android:paddingStart="7dp"
             android:paddingTop="2dp"
-            android:paddingEnd="8dp"
+            android:paddingEnd="7dp"
             android:paddingBottom="2dp"
             android:text="Tablet (You)"
-            android:textColor="@color/accent_primary"
+            android:textColor="@color/accent_primary_light"
             android:textSize="11sp"
             android:textStyle="bold" />
 
@@ -75,7 +75,8 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
+        android:lineSpacingExtra="3dp"
         android:text="Hello from Lenovo Tab M10!"
         android:textColor="@color/text_primary"
-        android:textSize="15sp" />
+        android:textSize="14sp" />
 </LinearLayout>

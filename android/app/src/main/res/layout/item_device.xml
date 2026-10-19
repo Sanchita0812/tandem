@@ -1,12 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:layout_marginBottom="8dp"
     android:background="@drawable/bg_card"
     android:gravity="center_vertical"
     android:orientation="horizontal"
-    android:padding="12dp">
+    android:padding="14dp">
 
     <LinearLayout
         android:layout_width="0dp"
@@ -31,17 +32,18 @@
             android:fontFamily="monospace"
             android:text="68:CA:C4:89:77:1C • -58 dBm"
             android:textColor="@color/text_secondary"
-            android:textSize="12sp" />
+            android:textSize="11sp" />
     </LinearLayout>
 
     <Button
         android:id="@+id/btnConnectDevice"
         style="@style/Widget.MaterialComponents.Button.UnelevatedButton"
         android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
+        android:layout_height="38dp"
         android:backgroundTint="@color/accent_primary"
         android:text="Connect"
         android:textAllCaps="false"
         android:textColor="@color/text_primary"
-        android:textSize="13sp" />
+        android:textSize="13sp"
+        app:cornerRadius="8dp" />
 </LinearLayout>
