@@ -15,12 +15,14 @@ object BleProtocol {
     val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
     const val TARGET_MAC_NAME = "TandemMac"
-    const val PROTOCOL_VERSION = 2
-    const val MAX_PAYLOAD_BYTES = 4096
+    const val PROTOCOL_VERSION = 3
+    const val MAX_PAYLOAD_BYTES = 5 * 1024 * 1024 // 5 MB for offline files and attachments
 
     const val MAGIC_SINGLE: Byte = 0xAA.toByte()
     const val MAGIC_MULTI: Byte = 0xAB.toByte()
     const val MAGIC_FINAL: Byte = 0xAC.toByte()
+    const val MAGIC_EXT_MULTI: Byte = 0xAD.toByte()
+    const val MAGIC_EXT_FINAL: Byte = 0xAE.toByte()
 
     fun currentIsoTimestamp(): String {
         val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
@@ -31,11 +33,15 @@ object BleProtocol {
 
 data class TandemMessage(
     val version: Int = BleProtocol.PROTOCOL_VERSION,
-    val type: String = "text",
+    val type: String = "text", // "text", "file", "encrypted", "handshake", "handshake_ack"
     val messageId: String = UUID.randomUUID().toString(),
     val timestamp: String = BleProtocol.currentIsoTimestamp(),
     val sender: String = "android",
-    val payload: String
+    val payload: String,
+    val fileName: String? = null,
+    val fileSize: Long? = null,
+    val mimeType: String? = null,
+    val sha256: String? = null
 ) {
     fun toJsonString(): String {
         val obj = JSONObject()
@@ -45,6 +51,10 @@ data class TandemMessage(
         obj.put("timestamp", timestamp)
         obj.put("sender", sender)
         obj.put("payload", payload)
+        if (fileName != null) obj.put("file_name", fileName)
+        if (fileSize != null) obj.put("file_size", fileSize)
+        if (mimeType != null) obj.put("mime_type", mimeType)
+        if (sha256 != null) obj.put("sha256", sha256)
         return obj.toString()
     }
 
@@ -58,7 +68,11 @@ data class TandemMessage(
                     messageId = obj.getString("message_id"),
                     timestamp = obj.getString("timestamp"),
                     sender = obj.optString("sender", "android"),
-                    payload = obj.getString("payload")
+                    payload = obj.getString("payload"),
+                    fileName = if (obj.has("file_name") && !obj.isNull("file_name")) obj.getString("file_name") else null,
+                    fileSize = if (obj.has("file_size") && !obj.isNull("file_size")) obj.getLong("file_size") else null,
+                    mimeType = if (obj.has("mime_type") && !obj.isNull("mime_type")) obj.getString("mime_type") else null,
+                    sha256 = if (obj.has("sha256") && !obj.isNull("sha256")) obj.getString("sha256") else null
                 )
             } catch (e: Exception) {
                 null

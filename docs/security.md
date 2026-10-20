@@ -64,6 +64,12 @@ However, operating over **unencrypted 2.4 GHz broadcast radio** without operatin
 | **Denial of Service** | **SEC-07** | **Chunk Buffer Exhaustion:** Rogue central floods Mac with millions of incomplete chunks with differing hashes. | Medium | Medium | 5.3 (Medium) | **Defended & Hardened** | Maximum 16 concurrent pending message buffers; 5.0s expiration deadline; 4KB payload cap. |
 | **Denial of Service** | **SEC-08** | **Unaligned Memory Trap:** Malformed chunk header triggers SIGBUS/SIGSEGV on ARM64 when reading UInt64 hash. | Medium | High | 6.5 (Medium) | **Defended & Hardened** | Replaced unsafe pointer loading with alignment-safe byte copying in `BlePeripheralManager.swift`. |
 | **Elevation of Privilege** | **SEC-09** | **Command Injection:** Attacker injects shell escapes (e.g. `; rm -rf /`, `$(whoami)`) into payload. | Low | Critical | None (0.0) | **Neutralized by Architecture** | No shell or execution runtime invoked; strings are bound solely to native AppKit/Android UI controls. |
+| **Tampering** | **SEC-10** | **Direct File Overwrite / Traversal:** Rogue peer transmits `file_name` with paths or duplicates existing files. | Medium | Medium | 4.8 (Medium) | **Defended & Hardened (v0.3)** | Strict whitelist sanitization (`[a-zA-Z0-9._-]`), leading dot stripping, and unique non-colliding filename generation (`file_1.ext`). |
+| **Spoofing** | **SEC-11** | **Plaintext File Injection:** In-range attacker injects unencrypted `"file"` packets while E2EE session active. | Low | High | 5.5 (Medium) | **Defended & Hardened (v0.3)** | Plaintext `"file"` messages dropped with security rejection if `TandemCrypto.isEncrypted` is true on both peers. |
+| **Denial of Service** | **SEC-12** | **Heap Exhaustion via Pending Chunks:** Concurrent multi-chunk streams flood Android tablet memory (OOM). | Medium | Medium | 5.3 (Medium) | **Defended & Hardened (v0.3)** | Stream concurrency capped at 2; global 8MB heap ceiling enforced across all active reassembly buffers in `ChunkFramer.kt`. |
+| **Information Disclosure** | **SEC-13** | **FileProvider Scope Over-Privilege:** Root paths (`.`) expose internal app sandbox files. | Low | Medium | 3.1 (Low) | **Defended & Hardened (v0.3)** | Restricted `file_paths.xml` to `Downloads/Tandem` only; deleted internal root `files-path` and `cache-path`. |
+| **Denial of Service** | **SEC-14** | **Unbounded Picker Stream Allocation:** Selecting oversized file exhausts RAM during input stream read. | Low | Medium | 4.2 (Medium) | **Defended & Hardened (v0.3)** | Implemented bounded chunk reader in `MainActivity.kt` with immediate threshold abort at 5MB ceiling. |
+| **Tampering** | **SEC-15** | **Stale Crypto Session on Disconnect:** Previous session keys and SAS badge persist after peer drops. | Low | Low | 2.5 (Low) | **Defended & Hardened (v0.3)** | Peripheral and Central automatically invoke `resetKeypair()`, wipe reassembly buffers, and clear security badge on disconnect. |
 
 ---
 
@@ -200,3 +206,52 @@ The v0.2 cryptographic architecture is fully operational:
 3. **Authenticated Encryption (AES-256-GCM):** 96-bit (12-byte) unique random IV per message, with 128-bit authentication tag ensuring confidentiality and integrity against tampering.
 4. **Out-of-Band (OOB) Authentication (SAS Code):** Lexicographically ordered SHA-256 hash of public keys produces an identical 6-digit code (`XXX-XXX`) displayed on both screens for MitM detection.
 5. **Session Lifecycle:** Disconnection immediately triggers `TandemCrypto.resetKeypair()`, zeroing out session keys on both peers.
+
+---
+
+## 7. v0.3 Offline File & Attachment Transfer Audit & Hardening
+
+Tandem v0.3 introduced offline binary file and photo transfers up to 5 MB framed over BLE GATT using 16-bit extended chunk framing (`0xAD`/`0xAE`). This extended the attack surface to file system interaction, memory buffering, and inter-app sharing.
+
+### 7.1. Insecure Direct File Overwrite & Traversal Defenses (SEC-10)
+- **Vulnerability:** Unchecked `lastPathComponent` on macOS or `File.name` on Android could allow dotfiles (e.g., `.zshrc`, `.nomedia`), path traversal edge cases (`"/"` or `".."` resolving to directory references), and silent overwriting of pre-existing user files with identical names.
+- **Defenses Implemented:**
+  1. **Strict Character Whitelisting:** Filenames are filtered against `[a-zA-Z0-9._-]`. All other characters (spaces, slashes, control characters, null bytes) are replaced with underscores.
+  2. **Leading Dot Stripping:** All leading periods (`.`) are stripped to prevent creation of hidden UNIX/Android system files.
+  3. **Fallback Safe Filename:** If sanitization leaves an empty string or reserved names (`.` / `..`), a fallback name `tandem_<short-id>.bin` is assigned.
+  4. **Length Truncation:** Filenames exceeding 120 characters are truncated while preserving the original file extension.
+  5. **Non-Destructive Unique Collision Resolution:** If a file with the target name already exists in `Downloads/Tandem/`, a monotonic numerical suffix (`photo_1.jpg`, `photo_2.jpg`) is appended. Existing files are **never** overwritten.
+
+### 7.2. Plaintext File Injection / Downgrade Prevention (SEC-11)
+- **Vulnerability:** While `"text"` messages verified that `isEncrypted == false` before accepting plaintext, the Android receiver did not verify encryption state for incoming `"file"` envelopes.
+- **Defenses Implemented:**
+  1. Both macOS (`BlePeripheralManager.swift`) and Android (`TandemBleCentral.kt`) now strictly reject unencrypted `"file"` messages with HTTP 403 / security drop whenever `TandemCrypto.isEncrypted` is true.
+  2. All authorized file transfers during an active session must be wrapped in authenticated `"encrypted"` frames with valid AES-256-GCM auth tags.
+
+### 7.3. Android Heap Exhaustion & Reassembly Denial of Service (SEC-12)
+- **Vulnerability:** With a 5 MB payload limit, permitting 16 concurrent pending chunk streams could allocate up to 80 MB of heap memory, risking an `OutOfMemoryError` crash on budget Android hardware (Lenovo Tab M10 HD, 2 GB RAM, 192 MB heap limit).
+- **Defenses Implemented in `ChunkFramer.kt`:**
+  1. **Stream Concurrency Cap:** Reduced `MAX_PENDING_STREAMS` from 16 to 2 on Android.
+  2. **Global Heap Buffer Ceiling:** Implemented `MAX_GLOBAL_BUFFER_BYTES = 8 MB`. If total pending bytes across all active reassemblies exceed 8 MB, incoming chunks are rejected.
+  3. **Mid-Stream Total Mutability Protection:** Added `bufferTotals` tracking. Chunks attempting to alter `totalChunks` mid-stream for an existing hash are rejected.
+  4. **Strict Expired Buffer Eviction:** Pending buffers and deadlines are purged after 15 seconds.
+
+### 7.4. FileProvider Sandbox Scope Hardening (SEC-13)
+- **Vulnerability:** `file_paths.xml` originally exported `<files-path name="files" path="." />` and `<cache-path name="cache" path="." />`, granting `FileProvider` URI generation access across the entire private internal application sandbox.
+- **Defenses Implemented:**
+  1. Removed all root `.` mappings.
+  2. Narrowed scope strictly to `<external-files-path name="tandem_downloads" path="Downloads/Tandem" />`.
+
+### 7.5. Bounded Input Stream Read in File Attachment Picker (SEC-14)
+- **Vulnerability:** In `MainActivity.kt`, selecting attachments from third-party content providers without a reported `OpenableColumns.SIZE` could trigger unconstrained `stream.readBytes()`, allocating large files directly into RAM.
+- **Defenses Implemented:**
+  1. Replaced unconstrained reads with a bounded chunked stream reader enforcing `BleProtocol.MAX_PAYLOAD_BYTES` (5 MB).
+  2. If the stream exceeds 5 MB, reading halts immediately, the buffer is discarded, and an error Toast is displayed without crashing.
+
+### 7.6. Central Disconnect Cryptographic Wipe (SEC-15)
+- **Vulnerability:** When a central disconnected from the macOS peripheral, the derived session key and UI SAS code badge persisted until the next connection.
+- **Defenses Implemented:**
+  1. When `connectedCentrals.isEmpty`, macOS immediately triggers `TandemCrypto.shared.resetKeypair()`.
+  2. Security code badge is cleared (`onSecurityCodeChanged?(nil)`).
+  3. Pending chunk buffers and recent message deduplication caches are wiped to ensure zero state leakage between sessions.
+

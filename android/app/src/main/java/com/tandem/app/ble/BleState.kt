@@ -37,7 +37,14 @@ data class MessageRecord(
     val timestamp: String,
     val direction: MessageDirection = MessageDirection.OUTGOING,
     var status: DeliveryStatus = DeliveryStatus.PENDING,
-    var statusDetail: String = ""
+    var statusDetail: String = "",
+    val type: String = "text", // "text" or "file"
+    val fileName: String? = null,
+    val fileSize: Long? = null,
+    val mimeType: String? = null,
+    var localFilePath: String? = null,
+    val sha256: String? = null,
+    var progress: Int = 100
 )
 
 typealias SentMessageRecord = MessageRecord

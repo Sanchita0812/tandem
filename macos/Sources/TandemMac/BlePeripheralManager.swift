@@ -1,5 +1,7 @@
 import Foundation
 import CoreBluetooth
+import CryptoKit
+import UniformTypeIdentifiers
 
 public enum BlePeripheralState: String {
     case poweredOff = "Bluetooth Off"
@@ -22,7 +24,9 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
     
     public var onStateChanged: ((BlePeripheralState, String) -> Void)?
     public var onMessageReceived: ((TandemMessage) -> Void)?
+    public var onFileReceived: ((TandemMessage, URL) -> Void)?
     public var onMessageDelivered: ((String, String) -> Void)?
+    public var onTransferProgress: ((String, Float) -> Void)?
     public var onSecurityCodeChanged: ((String?) -> Void)?
     public var onLog: ((String) -> Void)?
     
@@ -37,9 +41,11 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
     
     // Outbound transmission state
     private var outgoingChunkQueue: [Data] = []
-    private var isSendingChunks = false
     private var pendingOutboundId: String?
     private var pendingOutboundCallback: ((Bool, String) -> Void)?
+    private var pendingProgressCallback: ((Float) -> Void)?
+    private var totalOutboundChunks: Int = 0
+    private var sentOutboundChunks: Int = 0
     private var ackTimeoutTimer: Timer?
     
     public override init() {
@@ -58,29 +64,30 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
     
     public func startAdvertising() {
         guard peripheralManager.state == .poweredOn else {
-            log("Cannot start advertising: Bluetooth state is \(peripheralManager.state.rawValue)")
+            log("Cannot advertise: Bluetooth state is \(peripheralManager.state.rawValue)")
             return
         }
+        
+        peripheralManager.stopAdvertising()
         setupGattServices()
+        
+        let advertisementData: [String: Any] = [
+            CBAdvertisementDataServiceUUIDsKey: [BleProtocol.serviceUUID],
+            CBAdvertisementDataLocalNameKey: BleProtocol.localDeviceName
+        ]
+        
+        peripheralManager.startAdvertising(advertisementData)
+        updateState(.advertising, "Advertising service \(BleProtocol.serviceUUID.uuidString.prefix(8))...")
+        log("Started advertising as '\(BleProtocol.localDeviceName)' with Service UUID \(BleProtocol.serviceUUID)...")
     }
     
     public func stopAdvertising() {
-        if peripheralManager.isAdvertising {
-            peripheralManager.stopAdvertising()
-            log("BLE advertisement stopped.")
-            updateState(.idle, "Advertising stopped")
-        }
-    }
-    
-    private func updateState(_ state: BlePeripheralState, _ detail: String) {
-        currentState = state
-        onStateChanged?(state, detail)
+        peripheralManager.stopAdvertising()
+        updateState(.idle, "Advertising stopped")
+        log("Stopped advertising.")
     }
     
     private func setupGattServices() {
-        if peripheralManager.isAdvertising {
-            peripheralManager.stopAdvertising()
-        }
         peripheralManager.removeAllServices()
         
         let rxChar = CBMutableCharacteristic(
@@ -89,6 +96,7 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
             value: nil,
             permissions: [.writeable]
         )
+        self.rxCharacteristic = rxChar
         
         let txChar = CBMutableCharacteristic(
             type: BleProtocol.txCharUUID,
@@ -96,33 +104,28 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
             value: nil,
             permissions: [.readable]
         )
+        self.txCharacteristic = txChar
         
-        let infoValue = "TandemMac v0.2; E2EE BLE Bridge".data(using: .utf8)
-        let infoChar = CBMutableCharacteristic(
+        let deviceInfoData = "TandemMac/1.0 macOS/\(ProcessInfo.processInfo.operatingSystemVersionString)".data(using: .utf8)
+        let devInfoChar = CBMutableCharacteristic(
             type: BleProtocol.deviceInfoCharUUID,
             properties: [.read],
-            value: infoValue,
+            value: deviceInfoData,
             permissions: [.readable]
         )
+        self.deviceInfoCharacteristic = devInfoChar
         
-        let service = CBMutableService(type: BleProtocol.serviceUUID, primary: true)
-        service.characteristics = [rxChar, txChar, infoChar]
+        let tandemService = CBMutableService(type: BleProtocol.serviceUUID, primary: true)
+        tandemService.characteristics = [rxChar, txChar, devInfoChar]
         
-        self.rxCharacteristic = rxChar
-        self.txCharacteristic = txChar
-        self.deviceInfoCharacteristic = infoChar
-        
-        log("Registering GATT Service with CoreBluetooth...")
-        peripheralManager.add(service)
+        peripheralManager.add(tandemService)
+        log("Added Tandem GATT Service with Rx, Tx, and DeviceInfo characteristics.")
     }
     
-    private func startBroadcast() {
-        let adData: [String: Any] = [
-            CBAdvertisementDataServiceUUIDsKey: [BleProtocol.serviceUUID],
-            CBAdvertisementDataLocalNameKey: BleProtocol.localDeviceName
-        ]
-        log("Broadcasting BLE advertisement for service \(BleProtocol.serviceUUID.uuidString) as '\(BleProtocol.localDeviceName)'...")
-        peripheralManager.startAdvertising(adData)
+    private func updateState(_ state: BlePeripheralState, _ detail: String) {
+        currentState = state
+        log("State changed: \(state.rawValue) - \(detail)")
+        onStateChanged?(state, detail)
     }
     
     // MARK: - CBPeripheralManagerDelegate
@@ -130,99 +133,55 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
     public func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
         switch peripheral.state {
         case .poweredOn:
-            log("Bluetooth controller is Powered ON and ready.")
-            updateState(.idle, "Bluetooth powered on")
-            setupGattServices()
+            log("CoreBluetooth state: poweredOn")
+            startAdvertising()
         case .poweredOff:
-            log("Bluetooth controller is Powered OFF.")
+            log("CoreBluetooth state: poweredOff. Please turn Bluetooth ON.")
             updateState(.poweredOff, "Bluetooth is disabled in System Settings")
         case .unauthorized:
-            log("Bluetooth access unauthorized by macOS TCC.")
-            updateState(.unauthorized, "Grant Bluetooth permission in Privacy & Security")
+            log("CoreBluetooth state: unauthorized. Permission required in System Settings > Privacy > Bluetooth.")
+            updateState(.unauthorized, "Bluetooth permission denied")
         case .unsupported:
-            log("Bluetooth Low Energy Peripheral role unsupported on this Mac.")
-            updateState(.unsupported, "BLE peripheral mode unsupported")
+            log("CoreBluetooth state: unsupported.")
+            updateState(.unsupported, "BLE Peripheral role unsupported on this hardware")
         case .resetting:
-            log("Bluetooth stack is resetting...")
-            updateState(.resetting, "Bluetooth stack resetting")
+            log("CoreBluetooth state: resetting...")
+            updateState(.resetting, "Bluetooth stack resetting...")
         case .unknown:
-            log("Bluetooth state unknown.")
-            updateState(.idle, "State unknown")
+            log("CoreBluetooth state: unknown")
+            updateState(.idle, "Bluetooth status unknown")
         @unknown default:
-            log("Unknown Bluetooth state: \(peripheral.state.rawValue)")
+            log("CoreBluetooth state: unknown default")
+            updateState(.idle, "Unknown state")
         }
-    }
-    
-    public func peripheralManager(_ peripheral: CBPeripheralManager, didAdd service: CBService, error: Error?) {
-        if let error = error {
-            log("Failed to add GATT service: \(error.localizedDescription)")
-            updateState(.error, error.localizedDescription)
-            return
-        }
-        log("GATT Service registered successfully in local database. Starting advertisement...")
-        startBroadcast()
     }
     
     public func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
         if let error = error {
-            log("Failed to start advertising: \(error.localizedDescription)")
-            updateState(.error, error.localizedDescription)
+            log("Advertising failed with error: \(error.localizedDescription)")
+            updateState(.error, "Advertising error: \(error.localizedDescription)")
         } else {
-            log("SUCCESS: Advertising Tandem GATT service as '\(BleProtocol.localDeviceName)'")
-            updateState(.advertising, "Waiting for Android tablet connection...")
-        }
-    }
-    
-    public func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveRead request: CBATTRequest) {
-        log("Received read request for characteristic: \(request.characteristic.uuid.uuidString)")
-        if request.characteristic.uuid == BleProtocol.deviceInfoCharUUID {
-            let infoString = "TandemMac v0.2 (E2EE Active)"
-            let data = infoString.data(using: .utf8) ?? Data()
-            if request.offset > data.count {
-                peripheralManager.respond(to: request, withResult: .invalidOffset)
-                return
-            }
-            request.value = data.subdata(in: request.offset..<data.count)
-            peripheralManager.respond(to: request, withResult: .success)
-        } else if request.characteristic.uuid == BleProtocol.txCharUUID {
-            request.value = Data()
-            peripheralManager.respond(to: request, withResult: .success)
-        } else {
-            peripheralManager.respond(to: request, withResult: .attributeNotFound)
+            log("GATT Server advertising confirmed active.")
         }
     }
     
     public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didSubscribeTo characteristic: CBCharacteristic) {
+        log("Central subscribed to Tx notifications: \(central.identifier)")
         connectedCentrals.insert(central)
-        log("Peer connected & subscribed to Tx characteristic: Central UUID \(central.identifier)")
-        updateState(.connected, "Connected to Android device (\(central.identifier.uuidString.prefix(8)))")
+        updateState(.connected, "Connected to: \(central.identifier.uuidString.prefix(8)) (MTU: \(central.maximumUpdateValueLength))")
     }
     
     public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didUnsubscribeFrom characteristic: CBCharacteristic) {
+        log("Central unsubscribed from Tx: \(central.identifier)")
         connectedCentrals.remove(central)
-        log("Peer unsubscribed from Tx characteristic: Central UUID \(central.identifier)")
         if connectedCentrals.isEmpty {
+            log("All centrals disconnected. Resetting E2EE session keys and buffers.")
             TandemCrypto.shared.resetKeypair()
             onSecurityCodeChanged?(nil)
-            updateState(.advertising, "Peer disconnected; advertising for reconnect...")
-        }
-    }
-    
-    public func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveWrite requests: [CBATTRequest]) {
-        for request in requests {
-            guard let data = request.value, !data.isEmpty else {
-                if request.characteristic.properties.contains(.write) {
-                    peripheralManager.respond(to: request, withResult: .invalidAttributeValueLength)
-                }
-                continue
-            }
-            
-            log("Received write request: \(data.count) bytes on char \(request.characteristic.uuid.uuidString)")
-            handleIncomingBytes(data, from: request.central)
-            
-            if request.characteristic.properties.contains(.write) {
-                peripheralManager.respond(to: request, withResult: .success)
-            }
+            chunkBuffers.removeAll()
+            recentMessageIds.removeAll()
+            updateState(.advertising, "Peer disconnected. Advertising...")
+            startAdvertising()
         }
     }
     
@@ -230,11 +189,33 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
         processNextOutgoingChunk()
     }
     
-    // MARK: - Outgoing Message Transmission (Mac -> Android)
+    public func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveWrite requests: [CBATTRequest]) {
+        for request in requests {
+            if request.characteristic.uuid == BleProtocol.rxCharUUID {
+                if let data = request.value {
+                    handleIncomingBytes(data, from: request.central)
+                }
+                peripheralManager.respond(to: request, withResult: .success)
+            } else {
+                peripheralManager.respond(to: request, withResult: .requestNotSupported)
+            }
+        }
+    }
+    
+    public func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveRead request: CBATTRequest) {
+        if request.characteristic.uuid == BleProtocol.deviceInfoCharUUID {
+            request.value = deviceInfoCharacteristic?.value
+            peripheralManager.respond(to: request, withResult: .success)
+        } else {
+            peripheralManager.respond(to: request, withResult: .requestNotSupported)
+        }
+    }
+    
+    // MARK: - Outgoing Message Transmission
     
     public func sendMessage(text: String, messageId: String? = nil, completion: @escaping (Bool, String) -> Void) {
-        guard !connectedCentrals.isEmpty, txCharacteristic != nil else {
-            completion(false, "Android tablet is not connected")
+        guard currentState == .connected else {
+            completion(false, "Not connected to Android tablet")
             return
         }
         
@@ -249,7 +230,6 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
         
         var envelope: TandemMessage
         if TandemCrypto.shared.isEncrypted {
-            // Encrypt inner message
             let innerMsg = TandemMessage(
                 version: BleProtocol.protocolVersion,
                 type: "text",
@@ -273,7 +253,6 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
                 payload: ciphertext
             )
         } else {
-            // Plaintext fallback
             envelope = TandemMessage(
                 version: BleProtocol.protocolVersion,
                 type: "text",
@@ -289,7 +268,7 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
             return
         }
         
-        if jsonData.count > BleProtocol.maxPayloadBytes {
+        guard jsonData.count <= BleProtocol.maxPayloadBytes else {
             completion(false, "Message exceeds \(BleProtocol.maxPayloadBytes) bytes limit")
             return
         }
@@ -300,10 +279,95 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
         log("Enqueueing outbound message \(messageId) (\(jsonData.count) bytes across \(chunks.count) chunks)...")
         pendingOutboundId = messageId
         pendingOutboundCallback = completion
+        pendingProgressCallback = nil
+        totalOutboundChunks = chunks.count
+        sentOutboundChunks = 0
         
         outgoingChunkQueue.append(contentsOf: chunks)
-        startAckTimeout()
         processNextOutgoingChunk()
+    }
+    
+    // MARK: - Outgoing File & Attachment Transmission (v0.3)
+    
+    public func sendFile(url: URL, progress: ((Float) -> Void)? = nil, completion: @escaping (Bool, String) -> Void) {
+        guard currentState == .connected else {
+            completion(false, "Not connected to Android tablet")
+            return
+        }
+        
+        do {
+            let fileData = try Data(contentsOf: url)
+            guard !fileData.isEmpty else {
+                completion(false, "Cannot send empty file")
+                return
+            }
+            guard fileData.count <= BleProtocol.maxPayloadBytes else {
+                let mb = BleProtocol.maxPayloadBytes / (1024 * 1024)
+                completion(false, "File exceeds \(mb) MB size limit")
+                return
+            }
+            
+            let messageId = "file-mac-" + UUID().uuidString.prefix(8).lowercased()
+            let timestamp = ISO8601DateFormatter().string(from: Date())
+            let sha256Hex = SHA256.hash(data: fileData).compactMap { String(format: "%02x", $0) }.joined()
+            let filename = url.lastPathComponent
+            let mimeType = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+            let b64Payload = fileData.base64EncodedString()
+            
+            let innerMsg = TandemMessage(
+                version: BleProtocol.protocolVersion,
+                type: "file",
+                message_id: messageId,
+                timestamp: timestamp,
+                sender: "mac",
+                payload: b64Payload,
+                file_name: filename,
+                file_size: Int64(fileData.count),
+                mime_type: mimeType,
+                sha256: sha256Hex
+            )
+            
+            let envelope: TandemMessage
+            if TandemCrypto.shared.isEncrypted {
+                guard let innerData = try? JSONEncoder().encode(innerMsg),
+                      let innerJson = String(data: innerData, encoding: .utf8),
+                      let ciphertext = try? TandemCrypto.shared.encrypt(plaintext: innerJson) else {
+                    completion(false, "Failed to encrypt file envelope")
+                    return
+                }
+                envelope = TandemMessage(
+                    version: BleProtocol.protocolVersion,
+                    type: "encrypted",
+                    message_id: messageId,
+                    timestamp: timestamp,
+                    sender: "mac",
+                    payload: ciphertext
+                )
+            } else {
+                envelope = innerMsg
+            }
+            
+            guard let jsonData = try? JSONEncoder().encode(envelope) else {
+                completion(false, "Failed to encode file envelope JSON")
+                return
+            }
+            
+            let maxUpdateLength = connectedCentrals.first?.maximumUpdateValueLength ?? 180
+            let chunks = ChunkFramerSwift.framePayload(jsonData, messageId: messageId, maxChunkSize: maxUpdateLength)
+            
+            log("Enqueueing outbound file '\(filename)' (\(fileData.count) bytes across \(chunks.count) chunks)...")
+            pendingOutboundId = messageId
+            pendingOutboundCallback = completion
+            pendingProgressCallback = progress
+            totalOutboundChunks = chunks.count
+            sentOutboundChunks = 0
+            
+            outgoingChunkQueue.append(contentsOf: chunks)
+            processNextOutgoingChunk()
+            
+        } catch {
+            completion(false, "Failed to read file: \(error.localizedDescription)")
+        }
     }
     
     private func processNextOutgoingChunk() {
@@ -316,23 +380,36 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
             let success = peripheralManager.updateValue(chunk, for: txChar, onSubscribedCentrals: nil)
             if success {
                 outgoingChunkQueue.removeFirst()
+                sentOutboundChunks += 1
+                if totalOutboundChunks > 0 {
+                    let pct = Float(sentOutboundChunks) / Float(totalOutboundChunks)
+                    pendingProgressCallback?(pct)
+                    if let msgId = pendingOutboundId {
+                        onTransferProgress?(msgId, pct)
+                    }
+                }
             } else {
                 // Buffer full, will resume in peripheralManagerIsReady(toUpdateSubscribers:)
-                log("Notification buffer full, waiting for peripheralManagerIsReady callback...")
                 return
             }
         }
+        
+        if outgoingChunkQueue.isEmpty {
+            log("All \(totalOutboundChunks) chunks dispatched to BLE stack. Awaiting delivery ACK from Android...")
+            startAckTimeout(seconds: 15.0)
+        }
     }
     
-    private func startAckTimeout() {
+    private func startAckTimeout(seconds: TimeInterval = 10.0) {
         cancelAckTimeout()
-        ackTimeoutTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
+        ackTimeoutTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in
             guard let self = self else { return }
             if let callback = self.pendingOutboundCallback {
-                self.log("Delivery timeout: No ACK received from Android within 5.0 seconds.")
+                self.log("Delivery timeout: No ACK received from Android within \(seconds) seconds.")
                 callback(false, "Delivery timeout (no ACK from Android)")
                 self.pendingOutboundCallback = nil
                 self.pendingOutboundId = nil
+                self.pendingProgressCallback = nil
             }
         }
     }
@@ -359,18 +436,40 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
             return
         }
         
-        if (firstByte == FramingMagic.multiChunk.rawValue || firstByte == FramingMagic.finalChunk.rawValue) && data.count >= 11 {
-            let seqIndex = Int(data[1])
-            let totalChunks = Int(data[2])
-            guard totalChunks > 0 && totalChunks <= 64, seqIndex >= 0 && seqIndex < totalChunks else {
+        let isClassic = (firstByte == FramingMagic.multiChunk.rawValue || firstByte == FramingMagic.finalChunk.rawValue)
+        let isExtended = (firstByte == FramingMagic.extendedMultiChunk.rawValue || firstByte == FramingMagic.extendedFinalChunk.rawValue)
+        
+        if isClassic || isExtended {
+            let seqIndex: Int
+            let totalChunks: Int
+            let hashValue: UInt64
+            let chunkData: Data
+            
+            if isClassic {
+                guard data.count >= 11 else { return }
+                seqIndex = Int(data[1])
+                totalChunks = Int(data[2])
+                let hashBytes = data.subdata(in: 3..<11)
+                var h: UInt64 = 0
+                _ = withUnsafeMutableBytes(of: &h) { hashBytes.copyBytes(to: $0) }
+                hashValue = h
+                chunkData = data.subdata(in: 11..<data.count)
+            } else {
+                guard data.count >= 13 else { return }
+                seqIndex = (Int(data[1]) << 8) | Int(data[2])
+                totalChunks = (Int(data[3]) << 8) | Int(data[4])
+                let hashBytes = data.subdata(in: 5..<13)
+                var h: UInt64 = 0
+                _ = withUnsafeMutableBytes(of: &h) { hashBytes.copyBytes(to: $0) }
+                hashValue = h
+                chunkData = data.subdata(in: 13..<data.count)
+            }
+            
+            guard totalChunks > 0 && totalChunks <= 65535, seqIndex >= 0 && seqIndex < totalChunks else {
                 log("SECURITY: Dropping invalid chunk framing (seq=\(seqIndex), total=\(totalChunks))")
                 return
             }
             
-            let hashBytes = data.subdata(in: 3..<11)
-            var hashValue: UInt64 = 0
-            _ = withUnsafeMutableBytes(of: &hashValue) { hashBytes.copyBytes(to: $0) }
-            let chunkData = data.subdata(in: 11..<data.count)
             guard !chunkData.isEmpty else {
                 log("SECURITY: Dropping empty chunk payload (seq=\(seqIndex))")
                 return
@@ -379,12 +478,18 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
             let now = Date()
             chunkBuffers = chunkBuffers.filter { $0.value.deadline > now }
             
-            if chunkBuffers[hashValue] == nil && chunkBuffers.count >= maxPendingChunkBuffers {
+            if let existing = chunkBuffers[hashValue] {
+                guard existing.total == totalChunks else {
+                    log("SECURITY: Dropping chunk with conflicting totalChunks (\(totalChunks) != \(existing.total))")
+                    return
+                }
+            } else if chunkBuffers.count >= maxPendingChunkBuffers {
                 log("SECURITY: Dropping chunk; maximum pending reassembly buffers (\(maxPendingChunkBuffers)) reached.")
                 return
             }
             
-            var entry = chunkBuffers[hashValue] ?? (chunks: [:], total: totalChunks, deadline: now.addingTimeInterval(5.0))
+            var entry = chunkBuffers[hashValue] ?? (chunks: [:], total: totalChunks, deadline: now.addingTimeInterval(15.0))
+            entry.deadline = now.addingTimeInterval(15.0)
             
             let currentAccumulatedSize = entry.chunks.values.reduce(0) { $0 + $1.count }
             if currentAccumulatedSize + chunkData.count > BleProtocol.maxPayloadBytes {
@@ -396,6 +501,11 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
             entry.chunks[seqIndex] = chunkData
             chunkBuffers[hashValue] = entry
             
+            if totalChunks > 10 && seqIndex % 10 == 0 {
+                let pct = Int(Double(entry.chunks.count) / Double(totalChunks) * 100.0)
+                log("Receiving stream chunks: \(entry.chunks.count)/\(totalChunks) (\(pct)%)...")
+            }
+            
             if entry.chunks.count == totalChunks {
                 var fullData = Data()
                 for i in 0..<totalChunks {
@@ -404,7 +514,7 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
                     }
                 }
                 chunkBuffers.removeValue(forKey: hashValue)
-                log("Reassembly complete for hash \(hashValue): \(fullData.count) bytes")
+                log("Reassembly complete for hash \(hashValue): \(fullData.count) bytes across \(totalChunks) chunks")
                 processCompletePayload(fullData, from: central)
             }
             return
@@ -422,13 +532,11 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
         
         let decoder = JSONDecoder()
         
-        // 1. Check if it's an ACK envelope first
         if let ack = try? decoder.decode(TandemAck.self, from: data), ack.type == "ack" {
             handleInboundAck(ack)
             return
         }
         
-        // Also check raw JSON dictionary in case ACK structure differs
         if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let type = obj["type"] as? String, type == "ack" {
             let msgId = obj["message_id"] as? String ?? obj["messageId"] as? String ?? ""
@@ -442,19 +550,16 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
         do {
             let message = try decoder.decode(TandemMessage.self, from: data)
             
-            // 2. Handle Key Agreement Handshake Request
             if message.type == "handshake" {
                 handleHandshakeRequest(message, from: central)
                 return
             }
             
-            // 3. Handle Encrypted Message Payload
             if message.type == "encrypted" {
                 handleEncryptedMessage(message, from: central)
                 return
             }
             
-            // 4. Handle Plaintext Message
             handlePlaintextMessage(message, from: central)
             
         } catch {
@@ -477,7 +582,6 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
             log("🔒 E2EE Established! Shared AES-256-GCM Session Active. Security Code: \(sas)")
             onSecurityCodeChanged?(sas)
             
-            // Send Handshake Response with Mac's public key
             if let serverPubData = TandemCrypto.shared.getLocalRawPublicKey(), let txChar = txCharacteristic {
                 let hsAck = TandemMessage(
                     version: BleProtocol.protocolVersion,
@@ -489,12 +593,12 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
                 )
                 if let hsAckData = try? JSONEncoder().encode(hsAck) {
                     _ = peripheralManager.updateValue(hsAckData, for: txChar, onSubscribedCentrals: nil)
-                    log("Dispatched Handshake Response with Mac P-256 Public Key.")
+                    log("Dispatched Handshake ACK response with server public key.")
                 }
             }
         } catch {
-            log("Key exchange error: \(error.localizedDescription)")
-            sendAck(messageId: message.message_id, status: "error", code: 500, error: "Key exchange failed")
+            log("SECURITY REJECT: Failed ECDH key exchange: \(error.localizedDescription)")
+            sendAck(messageId: message.message_id, status: "error", code: 500, error: "Handshake failed")
         }
     }
     
@@ -502,9 +606,11 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
         log("Received Delivery ACK from Android for message: \(ack.message_id) (status=\(ack.status), code=\(ack.code))")
         if ack.message_id == pendingOutboundId {
             cancelAckTimeout()
+            pendingProgressCallback?(1.0)
             pendingOutboundCallback?(true, "Delivered (Ack 200)")
             pendingOutboundCallback = nil
             pendingOutboundId = nil
+            pendingProgressCallback = nil
         }
         onMessageDelivered?(ack.message_id, "Delivered (Ack 200)")
     }
@@ -527,14 +633,101 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
             
             if isDuplicateOrReplay(innerMsg) { return }
             
-            log("🔒 VALID ENCRYPTED MESSAGE RECEIVED: id=\(innerMsg.message_id), bytes=\(innerMsg.payload.utf8.count)")
-            onMessageReceived?(innerMsg)
-            sendAck(messageId: innerMsg.message_id, status: "delivered", code: 200, error: nil)
+            if innerMsg.type == "file" {
+                handleIncomingFile(innerMsg)
+            } else {
+                log("🔒 VALID ENCRYPTED MESSAGE RECEIVED: id=\(innerMsg.message_id), bytes=\(innerMsg.payload.utf8.count)")
+                onMessageReceived?(innerMsg)
+                sendAck(messageId: innerMsg.message_id, status: "delivered", code: 200, error: nil)
+            }
             
         } catch {
             log("SECURITY REJECT: AES-GCM decryption failed / Tag mismatch: \(error.localizedDescription)")
             sendAck(messageId: message.message_id, status: "error", code: 400, error: "Decryption failed")
         }
+    }
+    
+    private func handleIncomingFile(_ message: TandemMessage) {
+        guard let rawData = Data(base64Encoded: message.payload) else {
+            log("FILE REJECT: Invalid Base64 payload for file message \(message.message_id)")
+            sendAck(messageId: message.message_id, status: "error", code: 400, error: "Invalid Base64 payload")
+            return
+        }
+        
+        // Checksum verification
+        let computedSha = SHA256.hash(data: rawData).compactMap { String(format: "%02x", $0) }.joined()
+        if let expectedSha = message.sha256?.lowercased(), !expectedSha.isEmpty {
+            guard computedSha.lowercased() == expectedSha else {
+                log("SECURITY REJECT: SHA-256 checksum mismatch! Computed: \(computedSha), Expected: \(expectedSha)")
+                sendAck(messageId: message.message_id, status: "error", code: 400, error: "SHA-256 verification failed")
+                return
+            }
+            log("✓ SHA-256 Verified for incoming file: \(computedSha)")
+        }
+        
+        // Path traversal and overwrite defense
+        let rawFilename = message.file_name ?? "tandem_\(message.message_id)"
+        let safeFilename = sanitizeFilename(rawFilename, fallbackId: String(message.message_id.prefix(8)))
+        
+        let downloadsUrl = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
+        let tandemFolder = downloadsUrl.appendingPathComponent("Tandem", isDirectory: true)
+        try? FileManager.default.createDirectory(at: tandemFolder, withIntermediateDirectories: true)
+        
+        let destUrl = uniqueDestinationUrl(in: tandemFolder, filename: safeFilename)
+        do {
+            try rawData.write(to: destUrl, options: .atomic)
+            log("📁 File saved safely to: \(destUrl.path) (\(rawData.count) bytes)")
+            
+            onFileReceived?(message, destUrl)
+            onMessageReceived?(message)
+            sendAck(messageId: message.message_id, status: "delivered", code: 200, error: nil)
+        } catch {
+            log("FILE ERROR: Failed to save file to disk: \(error.localizedDescription)")
+            sendAck(messageId: message.message_id, status: "error", code: 500, error: "Failed to save file: \(error.localizedDescription)")
+        }
+    }
+    
+    private func sanitizeFilename(_ raw: String, fallbackId: String) -> String {
+        let baseName = URL(fileURLWithPath: raw).lastPathComponent
+        let safeChars = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+        var cleaned = baseName.unicodeScalars.filter { safeChars.contains($0) }.map { String($0) }.joined()
+        
+        while cleaned.hasPrefix(".") {
+            cleaned.removeFirst()
+        }
+        
+        if cleaned.isEmpty || cleaned == "." || cleaned == ".." {
+            cleaned = "tandem_\(fallbackId).bin"
+        }
+        
+        if cleaned.count > 120 {
+            let ext = (cleaned as NSString).pathExtension
+            let name = (cleaned as NSString).deletingPathExtension
+            if !ext.isEmpty {
+                cleaned = "\(String(name.prefix(110))).\(ext)"
+            } else {
+                cleaned = String(cleaned.prefix(120))
+            }
+        }
+        return cleaned
+    }
+    
+    private func uniqueDestinationUrl(in folder: URL, filename: String) -> URL {
+        var targetUrl = folder.appendingPathComponent(filename)
+        if !FileManager.default.fileExists(atPath: targetUrl.path) {
+            return targetUrl
+        }
+        
+        let ext = (filename as NSString).pathExtension
+        let base = (filename as NSString).deletingPathExtension
+        let extSuffix = ext.isEmpty ? "" : ".\(ext)"
+        
+        var counter = 1
+        while FileManager.default.fileExists(atPath: targetUrl.path) && counter < 1000 {
+            targetUrl = folder.appendingPathComponent("\(base)_\(counter)\(extSuffix)")
+            counter += 1
+        }
+        return targetUrl
     }
     
     private func handlePlaintextMessage(_ message: TandemMessage, from central: CBCentral) {
@@ -546,9 +739,13 @@ public class BlePeripheralManager: NSObject, CBPeripheralManagerDelegate {
         
         if isDuplicateOrReplay(message) { return }
         
-        log("VALID PLAINTEXT MESSAGE RECEIVED: id=\(message.message_id), bytes=\(message.payload.count)")
-        onMessageReceived?(message)
-        sendAck(messageId: message.message_id, status: "delivered", code: 200, error: nil)
+        if message.type == "file" {
+            handleIncomingFile(message)
+        } else {
+            log("VALID PLAINTEXT MESSAGE RECEIVED: id=\(message.message_id), bytes=\(message.payload.count)")
+            onMessageReceived?(message)
+            sendAck(messageId: message.message_id, status: "delivered", code: 200, error: nil)
+        }
     }
     
     private func isDuplicateOrReplay(_ message: TandemMessage) -> Bool {

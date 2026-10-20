@@ -173,10 +173,68 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Type Message to Mac"
+                    android:text="Message &amp; Offline File Composer"
                     android:textColor="@color/text_primary"
                     android:textSize="14sp"
                     android:textStyle="bold" />
+
+                <!-- Attachment Selection Chip Preview -->
+                <LinearLayout
+                    android:id="@+id/layoutAttachmentPreview"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/bg_input"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:padding="8dp"
+                    android:visibility="gone">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="4dp"
+                        android:text="📎"
+                        android:textSize="18sp" />
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:id="@+id/tvAttachedFileName"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:ellipsize="middle"
+                            android:singleLine="true"
+                            android:text="photo.jpg"
+                            android:textColor="@color/text_primary"
+                            android:textSize="13sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/tvAttachedFileSize"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="140 KB • Ready to send"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="11sp" />
+                    </LinearLayout>
+
+                    <Button
+                        android:id="@+id/btnRemoveAttachment"
+                        style="@style/Widget.MaterialComponents.Button.TextButton"
+                        android:layout_width="36dp"
+                        android:layout_height="36dp"
+                        android:minWidth="0dp"
+                        android:padding="0dp"
+                        android:text="✕"
+                        android:textColor="@color/accent_error"
+                        android:textSize="14sp" />
+                </LinearLayout>
 
                 <EditText
                     android:id="@+id/etMessageInput"
@@ -208,7 +266,7 @@
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
                         android:fontFamily="monospace"
-                        android:text="0 / 4096 bytes"
+                        android:text="Offline E2EE File &amp; Message Bridge"
                         android:textColor="@color/text_tertiary"
                         android:textSize="11sp" />
 
@@ -219,6 +277,20 @@
                         android:layout_marginEnd="10dp"
                         android:indeterminateTint="@color/accent_primary"
                         android:visibility="gone" />
+
+                    <Button
+                        android:id="@+id/btnAttachFile"
+                        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="38dp"
+                        android:layout_marginEnd="8dp"
+                        android:enabled="false"
+                        android:text="Attach 📎"
+                        android:textAllCaps="false"
+                        android:textColor="@color/accent_primary_light"
+                        android:textSize="13sp"
+                        app:cornerRadius="8dp"
+                        app:strokeColor="@color/accent_primary" />
 
                     <Button
                         android:id="@+id/btnSend"

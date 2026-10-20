@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/cardMessageRoot"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
@@ -79,4 +80,93 @@
         android:text="Hello from Lenovo Tab M10!"
         android:textColor="@color/text_primary"
         android:textSize="14sp" />
+
+    <!-- File Attachment Container (v0.3) -->
+    <LinearLayout
+        android:id="@+id/layoutFileAttachment"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <!-- Photo/Image Thumbnail -->
+        <ImageView
+            android:id="@+id/ivAttachmentThumbnail"
+            android:layout_width="match_parent"
+            android:layout_height="160dp"
+            android:layout_marginBottom="8dp"
+            android:background="@drawable/bg_input"
+            android:contentDescription="Photo Attachment"
+            android:scaleType="centerCrop"
+            android:visibility="gone" />
+
+        <!-- File Details Card -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="@drawable/bg_input"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="10dp">
+
+            <TextView
+                android:id="@+id/tvFileIcon"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="📄"
+                android:textSize="22sp" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/tvFileName"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="middle"
+                    android:singleLine="true"
+                    android:text="document.pdf"
+                    android:textColor="@color/text_primary"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tvFileSize"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="180 KB • SHA-256 Verified"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="11sp" />
+            </LinearLayout>
+
+            <Button
+                android:id="@+id/btnOpenFile"
+                style="@style/Widget.MaterialComponents.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:minWidth="0dp"
+                android:text="Open ↗"
+                android:textAllCaps="false"
+                android:textColor="@color/accent_primary_light"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <!-- Progress Bar for ongoing file transfer -->
+        <ProgressBar
+            android:id="@+id/pbTransferProgress"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="4dp"
+            android:layout_marginTop="4dp"
+            android:indeterminate="false"
+            android:max="100"
+            android:progress="0"
+            android:progressTint="@color/accent_primary"
+            android:visibility="gone" />
+    </LinearLayout>
 </LinearLayout>

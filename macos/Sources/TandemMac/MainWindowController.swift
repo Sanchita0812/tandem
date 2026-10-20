@@ -1,5 +1,6 @@
 import AppKit
 import CoreBluetooth
+import UniformTypeIdentifiers
 
 public class MainWindowController: NSWindowController, NSTextFieldDelegate {
     
@@ -20,6 +21,7 @@ public class MainWindowController: NSWindowController, NSTextFieldDelegate {
     // Composer
     private var composerBar: NSView!
     private var messageInputField: NSTextField!
+    private var attachButton: NSButton!
     private var sendButton: NSButton!
     private var charCountLabel: NSTextField!
     private var sendStatusLabel: NSTextField!
@@ -34,6 +36,7 @@ public class MainWindowController: NSWindowController, NSTextFieldDelegate {
     
     // Message state tracking
     private var messageDeliveryLabels: [String: NSTextField] = [:]
+    private var messageProgressBars: [String: NSProgressIndicator] = [:]
     
     public convenience init() {
         let window = NSWindow(
@@ -140,7 +143,7 @@ public class MainWindowController: NSWindowController, NSTextFieldDelegate {
         titleLabel.textColor = .white
         titleRow.addArrangedSubview(titleLabel)
         
-        let verBadge = NSTextField(labelWithString: " v0.2 ")
+        let verBadge = NSTextField(labelWithString: " v0.3 ")
         verBadge.wantsLayer = true
         verBadge.layer?.backgroundColor = NSColor(white: 1.0, alpha: 0.09).cgColor
         verBadge.layer?.cornerRadius = 4
@@ -265,13 +268,13 @@ public class MainWindowController: NSWindowController, NSTextFieldDelegate {
         emptyIcon.alignment = .center
         emptyStack.addArrangedSubview(emptyIcon)
         
-        let emptyTitle = NSTextField(labelWithString: "No Messages Yet")
+        let emptyTitle = NSTextField(labelWithString: "No Messages or Files Yet")
         emptyTitle.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
         emptyTitle.textColor = NSColor(white: 0.75, alpha: 1.0)
         emptyTitle.alignment = .center
         emptyStack.addArrangedSubview(emptyTitle)
         
-        let emptySub = NSTextField(labelWithString: "Open Tandem on your Android tablet and tap 'Scan & Connect'.\nMessages exchanged offline via BLE will appear here as directional chat bubbles.")
+        let emptySub = NSTextField(labelWithString: "Open Tandem on your Android tablet and tap 'Scan & Connect'.\nExchange end-to-end encrypted messages and offline files (photos, documents) directly over BLE.")
         emptySub.font = NSFont.systemFont(ofSize: 12, weight: .regular)
         emptySub.textColor = NSColor(white: 0.45, alpha: 1.0)
         emptySub.alignment = .center
@@ -302,7 +305,7 @@ public class MainWindowController: NSWindowController, NSTextFieldDelegate {
         ])
         
         // -------------------------------------------------------------
-        // 3. Docked Message Composer Bar
+        // 3. Docked Message & File Composer Bar
         // -------------------------------------------------------------
         composerBar = NSView()
         composerBar.wantsLayer = true
@@ -312,7 +315,7 @@ public class MainWindowController: NSWindowController, NSTextFieldDelegate {
         
         NSLayoutConstraint.activate([
             composerBar.widthAnchor.constraint(equalTo: rootStack.widthAnchor),
-            composerBar.heightAnchor.constraint(equalToConstant: 76)
+            composerBar.heightAnchor.constraint(equalToConstant: 78)
         ])
         
         let composerTopBorder = NSView()
@@ -350,6 +353,14 @@ public class MainWindowController: NSWindowController, NSTextFieldDelegate {
         composerInner.addArrangedSubview(inputRow)
         inputRow.widthAnchor.constraint(equalTo: composerInner.widthAnchor).isActive = true
         
+        // Attach File Button
+        attachButton = NSButton(title: "Attach 📎", target: self, action: #selector(attachFile))
+        attachButton.bezelStyle = .rounded
+        attachButton.controlSize = .regular
+        attachButton.isEnabled = false
+        attachButton.translatesAutoresizingMaskIntoConstraints = false
+        inputRow.addArrangedSubview(attachButton)
+        
         // Input Capsule Container
         let inputCapsule = NSView()
         inputCapsule.wantsLayer = true
@@ -364,7 +375,7 @@ public class MainWindowController: NSWindowController, NSTextFieldDelegate {
         messageInputField.isBordered = false
         messageInputField.drawsBackground = false
         messageInputField.focusRingType = .none
-        messageInputField.placeholderString = "Type a message to Android tablet... (Press Return to send)"
+        messageInputField.placeholderString = "Type a message or attach a file to send to Android... (Return to send)"
         messageInputField.font = NSFont.systemFont(ofSize: 13)
         messageInputField.textColor = .white
         messageInputField.delegate = self
@@ -396,7 +407,7 @@ public class MainWindowController: NSWindowController, NSTextFieldDelegate {
         composerInner.addArrangedSubview(statusRow)
         statusRow.widthAnchor.constraint(equalTo: composerInner.widthAnchor).isActive = true
         
-        charCountLabel = NSTextField(labelWithString: "0 / 4096 bytes")
+        charCountLabel = NSTextField(labelWithString: "Offline E2EE File & Message Bridge")
         charCountLabel.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
         charCountLabel.textColor = NSColor(white: 0.45, alpha: 1.0)
         statusRow.addArrangedSubview(charCountLabel)
@@ -505,13 +516,32 @@ public class MainWindowController: NSWindowController, NSTextFieldDelegate {
         
         manager.onMessageReceived = { [weak self] message in
             DispatchQueue.main.async {
-                self?.addMessageBubble(message, isOutgoing: false)
+                if message.type == "file" {
+                    let downloadsUrl = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
+                    let filename = URL(fileURLWithPath: message.file_name ?? "file").lastPathComponent
+                    let fileUrl = downloadsUrl.appendingPathComponent("Tandem").appendingPathComponent(filename)
+                    self?.addFileBubble(message, localUrl: fileUrl, isOutgoing: false)
+                } else {
+                    self?.addMessageBubble(message, isOutgoing: false)
+                }
+            }
+        }
+        
+        manager.onFileReceived = { [weak self] message, localUrl in
+            DispatchQueue.main.async {
+                self?.addFileBubble(message, localUrl: localUrl, isOutgoing: false)
             }
         }
         
         manager.onMessageDelivered = { [weak self] messageId, status in
             DispatchQueue.main.async {
                 self?.updateDeliveryStatus(messageId: messageId, status: status)
+            }
+        }
+        
+        manager.onTransferProgress = { [weak self] messageId, progress in
+            DispatchQueue.main.async {
+                self?.updateTransferProgress(messageId: messageId, progress: progress)
             }
         }
         
@@ -536,23 +566,27 @@ public class MainWindowController: NSWindowController, NSTextFieldDelegate {
         case .connected:
             statusDot.layer?.backgroundColor = NSColor(red: 0.15, green: 0.80, blue: 0.45, alpha: 1.0).cgColor
             sendButton.isEnabled = true
-            sendStatusLabel.stringValue = "Connected to tablet • Ready to send"
+            attachButton.isEnabled = true
+            sendStatusLabel.stringValue = "Connected to tablet • Ready to send messages & files"
             sendStatusLabel.textColor = NSColor(red: 0.35, green: 0.85, blue: 0.55, alpha: 1.0)
         case .advertising:
             statusDot.layer?.backgroundColor = NSColor(red: 0.25, green: 0.55, blue: 0.95, alpha: 1.0).cgColor
             sendButton.isEnabled = false
+            attachButton.isEnabled = false
             sendStatusLabel.stringValue = "Advertising • Waiting for tablet connection..."
             sendStatusLabel.textColor = NSColor(white: 0.55, alpha: 1.0)
             updateSecurityBadge(code: nil)
         case .poweredOff, .unauthorized, .unsupported, .error:
             statusDot.layer?.backgroundColor = NSColor.systemRed.cgColor
             sendButton.isEnabled = false
+            attachButton.isEnabled = false
             sendStatusLabel.stringValue = "Bluetooth unavailable"
             sendStatusLabel.textColor = NSColor.systemRed
             updateSecurityBadge(code: nil)
         case .idle, .resetting:
             statusDot.layer?.backgroundColor = NSColor.systemOrange.cgColor
             sendButton.isEnabled = false
+            attachButton.isEnabled = false
             updateSecurityBadge(code: nil)
         }
     }
@@ -567,16 +601,14 @@ public class MainWindowController: NSWindowController, NSTextFieldDelegate {
     }
     
     // -------------------------------------------------------------
-    // Directional Chat Bubble Rendering
+    // Directional Text Chat Bubble Rendering
     // -------------------------------------------------------------
     private func addMessageBubble(_ message: TandemMessage, isOutgoing: Bool) {
         emptyStateContainer.isHidden = true
         
-        // Full width row container
         let row = NSView()
         row.translatesAutoresizingMaskIntoConstraints = false
         
-        // Bubble container
         let bubble = NSView()
         bubble.wantsLayer = true
         bubble.layer?.cornerRadius = 14
@@ -584,18 +616,15 @@ public class MainWindowController: NSWindowController, NSTextFieldDelegate {
         bubble.translatesAutoresizingMaskIntoConstraints = false
         
         if isOutgoing {
-            // Outgoing: MacBook (Right side, dark cyan/navy tint)
             bubble.layer?.backgroundColor = NSColor(red: 0.10, green: 0.22, blue: 0.35, alpha: 0.95).cgColor
             bubble.layer?.borderColor = NSColor(red: 0.25, green: 0.48, blue: 0.72, alpha: 0.4).cgColor
         } else {
-            // Incoming: Android Tablet (Left side, dark graphite/slate)
             bubble.layer?.backgroundColor = NSColor(red: 0.12, green: 0.14, blue: 0.19, alpha: 0.95).cgColor
             bubble.layer?.borderColor = NSColor(white: 1.0, alpha: 0.08).cgColor
         }
         
         row.addSubview(bubble)
         
-        // Inside bubble stack
         let bubbleStack = NSStackView()
         bubbleStack.orientation = .vertical
         bubbleStack.spacing = 6
@@ -611,7 +640,7 @@ public class MainWindowController: NSWindowController, NSTextFieldDelegate {
             bubbleStack.trailingAnchor.constraint(equalTo: bubble.trailingAnchor)
         ])
         
-        // Top row: Sender Chip + Delivery Status + Timestamp
+        // Header Row
         let topRow = NSStackView()
         topRow.orientation = .horizontal
         topRow.spacing = 8
@@ -638,15 +667,7 @@ public class MainWindowController: NSWindowController, NSTextFieldDelegate {
             messageDeliveryLabels[message.message_id] = deliveryBadge
         }
         
-        let cleanTimestamp: String
-        if message.timestamp.contains("T") {
-            let parts = message.timestamp.split(separator: "T")
-            cleanTimestamp = parts.count > 1 ? String(parts[1].prefix(8)) : message.timestamp
-        } else {
-            cleanTimestamp = message.timestamp
-        }
-        
-        let timeLabel = NSTextField(labelWithString: cleanTimestamp)
+        let timeLabel = NSTextField(labelWithString: formatTimestamp(message.timestamp))
         timeLabel.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
         timeLabel.textColor = NSColor(white: 0.5, alpha: 1.0)
         topRow.addArrangedSubview(timeLabel)
@@ -680,7 +701,6 @@ public class MainWindowController: NSWindowController, NSTextFieldDelegate {
         
         bubbleStack.addArrangedSubview(footerRow)
         
-        // Row AutoLayout Constraints
         NSLayoutConstraint.activate([
             bubble.topAnchor.constraint(equalTo: row.topAnchor),
             bubble.bottomAnchor.constraint(equalTo: row.bottomAnchor),
@@ -694,15 +714,329 @@ public class MainWindowController: NSWindowController, NSTextFieldDelegate {
             bubble.leadingAnchor.constraint(equalTo: row.leadingAnchor).isActive = true
         }
         
-        // Insert newest at top
         messagesStackView.insertArrangedSubview(row, at: 0)
         row.widthAnchor.constraint(equalTo: messagesStackView.widthAnchor).isActive = true
+    }
+    
+    // -------------------------------------------------------------
+    // Directional File & Photo Bubble Rendering (v0.3)
+    // -------------------------------------------------------------
+    private func addFileBubble(_ message: TandemMessage, localUrl: URL?, isOutgoing: Bool) {
+        emptyStateContainer.isHidden = true
+        
+        let row = NSView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+        
+        let bubble = NSView()
+        bubble.wantsLayer = true
+        bubble.layer?.cornerRadius = 14
+        bubble.layer?.borderWidth = 1
+        bubble.translatesAutoresizingMaskIntoConstraints = false
+        
+        if isOutgoing {
+            bubble.layer?.backgroundColor = NSColor(red: 0.10, green: 0.22, blue: 0.35, alpha: 0.95).cgColor
+            bubble.layer?.borderColor = NSColor(red: 0.25, green: 0.48, blue: 0.72, alpha: 0.4).cgColor
+        } else {
+            bubble.layer?.backgroundColor = NSColor(red: 0.12, green: 0.14, blue: 0.19, alpha: 0.95).cgColor
+            bubble.layer?.borderColor = NSColor(white: 1.0, alpha: 0.08).cgColor
+        }
+        
+        row.addSubview(bubble)
+        
+        let bubbleStack = NSStackView()
+        bubbleStack.orientation = .vertical
+        bubbleStack.spacing = 8
+        bubbleStack.alignment = .leading
+        bubbleStack.edgeInsets = NSEdgeInsets(top: 12, left: 14, bottom: 12, right: 14)
+        bubbleStack.translatesAutoresizingMaskIntoConstraints = false
+        bubble.addSubview(bubbleStack)
+        
+        NSLayoutConstraint.activate([
+            bubbleStack.topAnchor.constraint(equalTo: bubble.topAnchor),
+            bubbleStack.bottomAnchor.constraint(equalTo: bubble.bottomAnchor),
+            bubbleStack.leadingAnchor.constraint(equalTo: bubble.leadingAnchor),
+            bubbleStack.trailingAnchor.constraint(equalTo: bubble.trailingAnchor)
+        ])
+        
+        // Header Row
+        let topRow = NSStackView()
+        topRow.orientation = .horizontal
+        topRow.spacing = 8
+        topRow.alignment = .centerY
+        
+        let senderBadge = NSTextField(labelWithString: isOutgoing ? " MacBook (You) " : " Android Tablet ")
+        senderBadge.wantsLayer = true
+        senderBadge.layer?.backgroundColor = isOutgoing ?
+            NSColor(red: 0.08, green: 0.30, blue: 0.18, alpha: 0.9).cgColor :
+            NSColor(red: 0.10, green: 0.22, blue: 0.42, alpha: 0.9).cgColor
+        senderBadge.layer?.cornerRadius = 4
+        senderBadge.font = NSFont.systemFont(ofSize: 10, weight: .bold)
+        senderBadge.textColor = isOutgoing ?
+            NSColor(red: 0.40, green: 0.90, blue: 0.60, alpha: 1.0) :
+            NSColor(red: 0.45, green: 0.75, blue: 1.0, alpha: 1.0)
+        topRow.addArrangedSubview(senderBadge)
+        
+        let deliveryBadge = NSTextField(labelWithString: isOutgoing ? "Sending 0%..." : "Received (Verified)")
+        deliveryBadge.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
+        deliveryBadge.textColor = isOutgoing ? NSColor.systemOrange : NSColor(red: 0.30, green: 0.85, blue: 0.55, alpha: 1.0)
+        topRow.addArrangedSubview(deliveryBadge)
+        messageDeliveryLabels[message.message_id] = deliveryBadge
+        
+        let timeLabel = NSTextField(labelWithString: formatTimestamp(message.timestamp))
+        timeLabel.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        timeLabel.textColor = NSColor(white: 0.5, alpha: 1.0)
+        topRow.addArrangedSubview(timeLabel)
+        
+        bubbleStack.addArrangedSubview(topRow)
+        
+        let filename = message.file_name ?? "File Attachment"
+        let isImage = message.mime_type?.hasPrefix("image/") == true ||
+            ["jpg", "jpeg", "png", "gif", "webp"].contains(URL(fileURLWithPath: filename).pathExtension.lowercased())
+        
+        // Image Thumbnail Preview
+        if isImage, let localUrl = localUrl, FileManager.default.fileExists(atPath: localUrl.path),
+           let image = NSImage(contentsOf: localUrl) {
+            let imageView = NSImageView()
+            imageView.image = image
+            imageView.imageScaling = .scaleProportionallyUpOrDown
+            imageView.wantsLayer = true
+            imageView.layer?.cornerRadius = 8
+            imageView.layer?.masksToBounds = true
+            imageView.translatesAutoresizingMaskIntoConstraints = false
+            
+            NSLayoutConstraint.activate([
+                imageView.widthAnchor.constraint(lessThanOrEqualToConstant: 260),
+                imageView.heightAnchor.constraint(lessThanOrEqualToConstant: 160)
+            ])
+            bubbleStack.addArrangedSubview(imageView)
+        }
+        
+        // File Details Card Box
+        let fileCard = NSView()
+        fileCard.wantsLayer = true
+        fileCard.layer?.backgroundColor = NSColor(white: 0.0, alpha: 0.25).cgColor
+        fileCard.layer?.cornerRadius = 8
+        fileCard.translatesAutoresizingMaskIntoConstraints = false
+        bubbleStack.addArrangedSubview(fileCard)
+        
+        let fileCardStack = NSStackView()
+        fileCardStack.orientation = .horizontal
+        fileCardStack.spacing = 10
+        fileCardStack.alignment = .centerY
+        fileCardStack.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
+        fileCardStack.translatesAutoresizingMaskIntoConstraints = false
+        fileCard.addSubview(fileCardStack)
+        
+        NSLayoutConstraint.activate([
+            fileCardStack.topAnchor.constraint(equalTo: fileCard.topAnchor),
+            fileCardStack.bottomAnchor.constraint(equalTo: fileCard.bottomAnchor),
+            fileCardStack.leadingAnchor.constraint(equalTo: fileCard.leadingAnchor),
+            fileCardStack.trailingAnchor.constraint(equalTo: fileCard.trailingAnchor),
+            fileCard.widthAnchor.constraint(equalTo: bubbleStack.widthAnchor)
+        ])
+        
+        let iconLabel = NSTextField(labelWithString: isImage ? "🖼️" : "📄")
+        iconLabel.font = NSFont.systemFont(ofSize: 22)
+        fileCardStack.addArrangedSubview(iconLabel)
+        
+        let fileInfoStack = NSStackView()
+        fileInfoStack.orientation = .vertical
+        fileInfoStack.spacing = 2
+        fileInfoStack.alignment = .leading
+        
+        let nameLabel = NSTextField(labelWithString: filename)
+        nameLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        nameLabel.textColor = .white
+        nameLabel.lineBreakMode = .byTruncatingMiddle
+        fileInfoStack.addArrangedSubview(nameLabel)
+        
+        let sizeText: String
+        if let s = message.file_size, s > 0 {
+            sizeText = ByteCountFormatter.string(fromByteCount: s, countStyle: .file)
+        } else {
+            sizeText = "Attachment"
+        }
+        
+        let subFileText = NSTextField(labelWithString: "\(sizeText) • E2EE Encrypted")
+        subFileText.font = NSFont.systemFont(ofSize: 10.5, weight: .regular)
+        subFileText.textColor = NSColor(white: 0.65, alpha: 1.0)
+        fileInfoStack.addArrangedSubview(subFileText)
+        
+        fileCardStack.addArrangedSubview(fileInfoStack)
+        
+        let fileSpacer = NSView()
+        fileSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        fileCardStack.addArrangedSubview(fileSpacer)
+        
+        // Show in Finder / Open Button
+        if let localUrl = localUrl {
+            let openBtn = FileActionButton(title: "Finder ↗", url: localUrl)
+            openBtn.bezelStyle = .rounded
+            openBtn.controlSize = .small
+            openBtn.target = self
+            openBtn.action = #selector(openFileAction(_:))
+            fileCardStack.addArrangedSubview(openBtn)
+        }
+        
+        // Transfer Progress Bar (for outbound transfers)
+        if isOutgoing {
+            let progressBar = NSProgressIndicator()
+            progressBar.isIndeterminate = false
+            progressBar.minValue = 0.0
+            progressBar.maxValue = 1.0
+            progressBar.doubleValue = 0.05
+            progressBar.style = .bar
+            progressBar.translatesAutoresizingMaskIntoConstraints = false
+            bubbleStack.addArrangedSubview(progressBar)
+            progressBar.widthAnchor.constraint(equalTo: bubbleStack.widthAnchor).isActive = true
+            messageProgressBars[message.message_id] = progressBar
+        }
+        
+        // Footer: SHA-256 Checksum Badge
+        let footerRow = NSStackView()
+        footerRow.orientation = .horizontal
+        footerRow.spacing = 6
+        footerRow.alignment = .centerY
+        
+        if let sha = message.sha256, !sha.isEmpty {
+            let shaBadge = NSTextField(labelWithString: "✓ SHA-256: \(sha.prefix(12))...")
+            shaBadge.font = NSFont.monospacedSystemFont(ofSize: 9.5, weight: .regular)
+            shaBadge.textColor = NSColor(red: 0.35, green: 0.85, blue: 0.55, alpha: 0.9)
+            footerRow.addArrangedSubview(shaBadge)
+        }
+        
+        let idLabel = NSTextField(labelWithString: "ID: \(String(message.message_id.prefix(12)))")
+        idLabel.font = NSFont.monospacedSystemFont(ofSize: 9.5, weight: .regular)
+        idLabel.textColor = NSColor(white: 0.38, alpha: 1.0)
+        footerRow.addArrangedSubview(idLabel)
+        
+        bubbleStack.addArrangedSubview(footerRow)
+        
+        NSLayoutConstraint.activate([
+            bubble.topAnchor.constraint(equalTo: row.topAnchor),
+            bubble.bottomAnchor.constraint(equalTo: row.bottomAnchor),
+            bubble.widthAnchor.constraint(lessThanOrEqualTo: row.widthAnchor, multiplier: 0.82),
+            bubble.widthAnchor.constraint(greaterThanOrEqualToConstant: 280)
+        ])
+        
+        if isOutgoing {
+            bubble.trailingAnchor.constraint(equalTo: row.trailingAnchor).isActive = true
+        } else {
+            bubble.leadingAnchor.constraint(equalTo: row.leadingAnchor).isActive = true
+        }
+        
+        messagesStackView.insertArrangedSubview(row, at: 0)
+        row.widthAnchor.constraint(equalTo: messagesStackView.widthAnchor).isActive = true
+    }
+    
+    @objc private func openFileAction(_ sender: FileActionButton) {
+        if FileManager.default.fileExists(atPath: sender.url.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([sender.url])
+        } else {
+            let downloadsFolder = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!.appendingPathComponent("Tandem")
+            NSWorkspace.shared.open(downloadsFolder)
+        }
     }
     
     private func updateDeliveryStatus(messageId: String, status: String) {
         if let label = messageDeliveryLabels[messageId] {
             label.stringValue = status
             label.textColor = NSColor(red: 0.30, green: 0.85, blue: 0.55, alpha: 1.0)
+        }
+        if let bar = messageProgressBars[messageId] {
+            bar.doubleValue = 1.0
+            bar.isHidden = true
+        }
+    }
+    
+    private func updateTransferProgress(messageId: String, progress: Float) {
+        if let bar = messageProgressBars[messageId] {
+            bar.doubleValue = Double(progress)
+            if progress >= 1.0 {
+                bar.isHidden = true
+            }
+        }
+        if let label = messageDeliveryLabels[messageId] {
+            let pct = Int(progress * 100.0)
+            if pct < 100 {
+                label.stringValue = "Sending \(pct)%..."
+                label.textColor = NSColor.systemOrange
+            }
+        }
+    }
+    
+    @objc private func attachFile() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canCreateDirectories = false
+        panel.canChooseFiles = true
+        panel.title = "Select File or Photo to Send to Tablet"
+        panel.message = "Selected file will be encrypted with AES-256-GCM and transferred offline over BLE."
+        
+        panel.beginSheetModal(for: window!) { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            self?.sendFileFromUrl(url)
+        }
+    }
+    
+    private func sendFileFromUrl(_ url: URL) {
+        guard let attr = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let fileSize = attr[.size] as? Int64 else {
+            return
+        }
+        
+        let maxMb = BleProtocol.maxPayloadBytes / (1024 * 1024)
+        if fileSize > Int64(BleProtocol.maxPayloadBytes) {
+            let alert = NSAlert()
+            alert.messageText = "File Exceeds Size Limit"
+            alert.informativeText = "Selected file is \(ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file)). Maximum supported BLE transfer size is \(maxMb) MB."
+            alert.alertStyle = .warning
+            alert.runModal()
+            return
+        }
+        
+        let messageId = "file-mac-" + UUID().uuidString.prefix(8).lowercased()
+        let filename = url.lastPathComponent
+        let mimeType = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+        
+        let localMsg = TandemMessage(
+            version: BleProtocol.protocolVersion,
+            type: "file",
+            message_id: messageId,
+            timestamp: ISO8601DateFormatter().string(from: Date()),
+            sender: "mac",
+            payload: "",
+            file_name: filename,
+            file_size: fileSize,
+            mime_type: mimeType,
+            sha256: nil
+        )
+        
+        addFileBubble(localMsg, localUrl: url, isOutgoing: true)
+        
+        sendButton.isEnabled = false
+        attachButton.isEnabled = false
+        sendStatusLabel.stringValue = "Encrypting & dispatching '\(filename)'..."
+        
+        BlePeripheralManager.shared.sendFile(url: url, progress: { [weak self] pct in
+            DispatchQueue.main.async {
+                self?.updateTransferProgress(messageId: messageId, progress: pct)
+            }
+        }) { [weak self] success, detail in
+            DispatchQueue.main.async {
+                self?.sendButton.isEnabled = true
+                self?.attachButton.isEnabled = true
+                if success {
+                    self?.sendStatusLabel.stringValue = "Delivered '\(filename)' to Android (Ack 200)"
+                    self?.sendStatusLabel.textColor = NSColor(red: 0.30, green: 0.85, blue: 0.55, alpha: 1.0)
+                    self?.updateDeliveryStatus(messageId: messageId, status: "Delivered (Ack 200)")
+                } else {
+                    self?.sendStatusLabel.stringValue = "File delivery failed: \(detail)"
+                    self?.sendStatusLabel.textColor = NSColor.systemRed
+                    self?.updateDeliveryStatus(messageId: messageId, status: "Failed: \(detail)")
+                }
+            }
         }
     }
     
@@ -711,7 +1045,7 @@ public class MainWindowController: NSWindowController, NSTextFieldDelegate {
         guard !text.isEmpty else { return }
         
         messageInputField.stringValue = ""
-        charCountLabel.stringValue = "0 / 4096 bytes"
+        charCountLabel.stringValue = "Offline E2EE File & Message Bridge"
         sendButton.isEnabled = false
         sendStatusLabel.stringValue = "Encrypting & dispatching chunks..."
         
@@ -744,7 +1078,7 @@ public class MainWindowController: NSWindowController, NSTextFieldDelegate {
     
     public func controlTextDidChange(_ obj: Notification) {
         let count = messageInputField.stringValue.utf8.count
-        charCountLabel.stringValue = "\(count) / 4096 bytes"
+        charCountLabel.stringValue = "\(count) bytes typed"
     }
     
     private func appendLog(_ line: String) {
@@ -769,6 +1103,7 @@ public class MainWindowController: NSWindowController, NSTextFieldDelegate {
     
     @objc private func clearFeed() {
         messageDeliveryLabels.removeAll()
+        messageProgressBars.removeAll()
         for subview in messagesStackView.arrangedSubviews {
             messagesStackView.removeArrangedSubview(subview)
             subview.removeFromSuperview()
@@ -782,5 +1117,26 @@ public class MainWindowController: NSWindowController, NSTextFieldDelegate {
         if !isLogVisible {
             toggleLogButton.title = "Show Logs"
         }
+    }
+    
+    private func formatTimestamp(_ isoStr: String) -> String {
+        if isoStr.contains("T") {
+            let parts = isoStr.split(separator: "T")
+            return parts.count > 1 ? String(parts[1].prefix(8)) : isoStr
+        }
+        return isoStr
+    }
+}
+
+// Custom button class to hold target file URL
+class FileActionButton: NSButton {
+    let url: URL
+    init(title: String, url: URL) {
+        self.url = url
+        super.init(frame: .zero)
+        self.title = title
+    }
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
     }
 }

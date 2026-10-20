@@ -154,7 +154,52 @@ When encoded envelopes exceed `negotiated_mtu - 3`, both Android and macOS use i
 | `11..N` | Variable | bytes | **Chunk Payload Bytes** |
 
 ### Framing & Reassembly Rules
-- **Maximum Chunks:** 64 chunks.
-- **Maximum Assembled Payload:** 4,096 bytes.
+- **Maximum Classic Chunks:** 64 chunks (11-byte header: `0xAB` / `0xAC`).
+- **Maximum Assembled Text Payload:** 4,096 bytes.
 - **Reassembly Buffer Ceiling:** Maximum 16 concurrent pending message streams.
-- **Reassembly Timeout:** 5.0 seconds auto-purge deadline.
+- **Reassembly Timeout:** Refreshes by 15.0 seconds on each received chunk.
+
+---
+
+## 7. Offline File & Attachment Transfer Specification (v0.3)
+
+### File Envelope Schema
+When exchanging files, documents, or photos, the inner plaintext envelope specifies `type = "file"` with metadata:
+
+```json
+{
+  "version": 3,
+  "type": "file",
+  "message_id": "file-8f12a3e0-634a",
+  "timestamp": "2026-10-19T14:19:00.120Z",
+  "sender": "android",
+  "payload": "<Base64 Encoded File Binary Data>",
+  "file_name": "photo_20261019.jpg",
+  "file_size": 184520,
+  "mime_type": "image/jpeg",
+  "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}
+```
+
+The entire file envelope is then serialized to UTF-8 JSON, encrypted with AES-256-GCM via the active ECDH session key, and wrapped inside the outer `type: "encrypted"` envelope.
+
+### Extended Chunk Framing (13-byte Header for Large Files)
+For multi-chunk payloads requiring more than 64 chunks (up to 65,535 chunks $\approx$ 32 MB), the extended framing format is used:
+
+| Byte Offset | Size | Type | Field Description |
+| :--- | :--- | :--- | :--- |
+| `0` | 1 byte | uint8 | **Extended Magic**: `0xAD` (Multi-chunk start/continue), `0xAE` (Final chunk) |
+| `1..2` | 2 bytes | uint16 | **Sequence Index** (Big Endian, `0..65534`) |
+| `3..4` | 2 bytes | uint16 | **Total Chunks** (Big Endian, `1..65535`) |
+| `5..12` | 8 bytes | uint64 | **Message Hash / ID Prefix** (8-byte hash of `message_id`) |
+| `13..N` | Variable | bytes | **Chunk Payload Bytes** |
+
+### File Transfer Security & Verification Rules
+1. **End-to-End Encryption:** File bytes are encrypted with AES-256-GCM using the negotiated ECDH session key. Eavesdroppers only observe high-entropy ciphertext chunks.
+2. **SHA-256 Cryptographic Checksum:** The sender computes `SHA-256(rawBytes)`. The receiver verifies the checksum after Base64 decoding; if mismatched, the file is discarded and an error ACK is sent.
+3. **Path Traversal Defense:** Receivers strictly sanitize `file_name` by stripping directory separators (`/`, `\`, `..`) and using only the base filename.
+4. **Max File Size:** Capped at 5,242,880 bytes (5 MB) to enforce bounded memory allocation on mobile hardware.
+5. **Storage Destination:**
+   - Android: `Downloads/Tandem/<filename>` (accessible via Android Storage Access Framework & `FileProvider`).
+   - macOS: `~/Downloads/Tandem/<filename>`.
+

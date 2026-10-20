@@ -1,10 +1,10 @@
-# Tandem (v0.2) — Offline BLE Bridge with Two-Way Messaging & E2EE
+# Tandem (v0.3) — Offline BLE Bridge: E2EE Messages & File Transfer
 
-Tandem is a local-first, zero-cloud bridge between an Android 10 tablet (**Lenovo Tab M10 HD**) and a **MacBook**. It enables secure, offline **two-way text messaging** and **End-to-End Encryption (AES-256-GCM + ECDH P-256)** over **Bluetooth Low Energy (BLE GATT)** without requiring Wi-Fi, mobile data, local network routers, or cloud relays.
+Tandem is a local-first, zero-cloud bridge between an Android 10 tablet (**Lenovo Tab M10 HD**) and a **MacBook**. It enables secure, offline **two-way text messaging**, **photo & document transfer (up to 5 MB)**, and **End-to-End Encryption (AES-256-GCM + ECDH P-256)** over **Bluetooth Low Energy (BLE GATT)** without requiring Wi-Fi, mobile data, local network routers, or cloud relays.
 
 ```
 +-------------------------------------------------------------------------------------------------+
-|                                 v0.2 BIDIRECTIONAL E2EE BRIDGE                                  |
+|                                 v0.3 BIDIRECTIONAL E2EE BRIDGE                                  |
 |                                                                                                 |
 |   Lenovo Tab M10 (Android 10)                                          MacBook (macOS 13+)      |
 |   +--------------------------+                                        +-----------------------+ |
@@ -15,11 +15,11 @@ Tandem is a local-first, zero-cloud bridge between an Android 10 tablet (**Lenov
 |   | 2. E2EE Active Badge     |                                        | 2. E2EE Active Badge  | |
 |   |    [Code: 482-195]       |<--- Both screens display matching SAS -|    [Code: 482-195]    | |
 |   |                          |                                        |                       | |
-|   | 3. Send to Mac           |==== Encrypted Writes (AES-GCM) =======>| 3. Live Messages Feed | |
-|   |    (Delivery Ack 200)    |<=== Delivery ACK Notification =========|                       | |
+|   | 3. Send Text & Files     |==== Encrypted Writes (AES-GCM) =======>| 3. Live Feed & Files  | |
+|   |    (Delivery Ack 200)    |<=== Delivery ACK Notification =========|    (Save to Downloads)| |
 |   |                          |                                        |                       | |
-|   | 4. Live Messages Feed    |<=== Encrypted Notifications (AES-GCM) =| 4. Send to Android    | |
-|   |                          |==== Delivery ACK Write ===============>|    (Delivery Ack 200) | |
+|   | 4. Live Feed & Files     |<=== Encrypted Notifications (AES-GCM) =| 4. Send Text & Files  | |
+|   |    (Save to Downloads)   |==== Delivery ACK Write ===============>|    (Delivery Ack 200) | |
 |   +--------------------------+                                        +-----------------------+ |
 +-------------------------------------------------------------------------------------------------+
 ```
@@ -28,7 +28,7 @@ Tandem is a local-first, zero-cloud bridge between an Android 10 tablet (**Lenov
 
 ## 1. Technical Documentation & Specs
 
-- **[BLE Protocol Specification (v0.2)](file:///Users/sanchitakiran/Documents/Tandem/docs/ble-protocol.md):** 128-bit UUID constants, ephemeral P-256 key exchange, AES-256-GCM envelope schema, and symmetrical chunk framing (11-byte header).
+- **[BLE Protocol Specification (v0.3)](file:///Users/sanchitakiran/Documents/Tandem/docs/ble-protocol.md):** 128-bit UUID constants, ephemeral P-256 key exchange, AES-256-GCM envelope schema, extended 16-bit chunk framing (`0xAD`/`0xAE`), and SHA-256 integrity verification.
 - **[Cybersecurity Threat Model & Audit](file:///Users/sanchitakiran/Documents/Tandem/docs/security.md):** STRIDE matrix, attack surface analysis, memory safety remediations, and radio eavesdropping defense.
 - **[Architecture & BLE Role Analysis](file:///Users/sanchitakiran/Documents/Tandem/docs/architecture.md):** Android 10 peripheral limitations and GATT Central/Server topology decision.
 - **[Hardware Verification Checklist](file:///Users/sanchitakiran/Documents/Tandem/docs/test-plan.md):** Physical test protocol with Wi-Fi and mobile data OFF.
@@ -41,8 +41,8 @@ Tandem is a local-first, zero-cloud bridge between an Android 10 tablet (**Lenov
 ```text
 Tandem/
 ├── .gitignore                # Exclusion rules for macOS, Android & IDE caches
-├── README.md                 # Complete system guide & setup instructions
-├── Tandem-v0.1.apk           # Pre-compiled standalone Android APK (v0.2 features)
+├── Tandem-v0.3.apk           # Pre-compiled standalone Android APK (v0.3 with File Transfer)
+├── Tandem.apk                # Convenience symlink to latest APK
 ├── docs/
 │   ├── architecture.md       # BLE feasibility investigation & topology decisions
 │   ├── ble-protocol.md       # Fixed UUIDs, ECDH handshake, AES-GCM & chunk framing
@@ -114,14 +114,15 @@ cd macos
 ### Install Pre-built APK
 - **Via ADB:**
   ```bash
-  /opt/homebrew/share/android-commandlinetools/platform-tools/adb install -r Tandem-v0.1.apk
+  /opt/homebrew/share/android-commandlinetools/platform-tools/adb install -r Tandem-v0.3.apk
   ```
-- **Via Direct Transfer:** Transfer `Tandem-v0.1.apk` via USB cable or SD card and install.
+- **Via Direct Transfer:** Transfer `Tandem-v0.3.apk` or `Tandem.apk` via USB cable or SD card and install.
 
 ### Key Features on Android:
 - **Zero Internet Permissions:** Android OS kernel sandboxing guarantees no network access (`android.permission.INTERNET` is omitted).
-- **Two-Way Messaging:** View incoming messages sent from the Mac with blue `MacBook (BLE)` badges; send messages to the Mac with green `Tablet (You)` badges.
+- **Two-Way Messaging & File Transfer:** Exchange encrypted text and offline files (photos, documents up to 5 MB) with live transfer progress.
 - **Hardware-Accelerated AES-GCM:** Real-time encryption/decryption using native Android JCE.
+- **Secure FileProvider:** Tap "Open" on received files to view directly in Gallery, Photos, or document viewers.
 
 ### Rebuild Anytime
 ```bash

@@ -12,10 +12,13 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.util.Base64
 import org.json.JSONObject
+import java.io.File
+import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentLinkedQueue
 
@@ -37,6 +40,8 @@ class TandemBleCentral(private val context: Context) {
     var onStateChanged: ((BleConnectionState, String) -> Unit)? = null
     var onDeviceDiscovered: ((DiscoveredDevice) -> Unit)? = null
     var onMessageReceived: ((TandemMessage) -> Unit)? = null
+    var onFileReceived: ((TandemMessage, File) -> Unit)? = null
+    var onTransferProgress: ((String, Float) -> Unit)? = null
     var onSecurityCodeGenerated: ((String?) -> Unit)? = null
     var onLog: ((String) -> Unit)? = null
 
@@ -44,7 +49,10 @@ class TandemBleCentral(private val context: Context) {
     private val writeQueue = ConcurrentLinkedQueue<ByteArray>()
     private var isWriting = false
     private var pendingSendCallback: ((Boolean, String) -> Unit)? = null
+    private var pendingProgressCallback: ((Float) -> Unit)? = null
     private var pendingMessageId: String? = null
+    private var totalChunksCount = 0
+    private var sentChunksCount = 0
     private var ackTimeoutRunnable: Runnable? = null
 
     // Anti-replay and deduplication cache (SEC-04 / SEC-07)
@@ -58,40 +66,54 @@ class TandemBleCentral(private val context: Context) {
         get() = bluetoothAdapter?.isMultipleAdvertisementSupported == true
 
     private fun log(message: String) {
-        val formatted = "[${BleProtocol.currentIsoTimestamp().substring(11, 19)}] $message"
+        val timestamp = BleProtocol.currentIsoTimestamp().substringAfter("T").substringBefore("Z")
+        val formatted = "[$timestamp] $message"
+        android.util.Log.d("TandemBleCentral", formatted)
         mainHandler.post { onLog?.invoke(formatted) }
     }
 
-    private fun updateState(state: BleConnectionState, detail: String = "") {
+    private fun updateState(state: BleConnectionState, detail: String) {
         currentState = state
+        log("State changed: ${state.label} - $detail")
         mainHandler.post { onStateChanged?.invoke(state, detail) }
     }
 
-    // MARK: - Scanning
+    // MARK: - Scanning & Connection
 
     fun startScanning() {
-        val scanner = bluetoothAdapter?.bluetoothLeScanner
-        if (scanner == null || !isBluetoothEnabled) {
-            log("Cannot scan: Bluetooth is disabled or unavailable.")
+        val adapter = bluetoothAdapter
+        if (adapter == null || !adapter.isEnabled) {
             updateState(BleConnectionState.ERROR, "Bluetooth is disabled")
+            log("Cannot start scan: Bluetooth adapter unavailable or turned off.")
             return
         }
 
-        if (isScanning) return
+        val scanner = adapter.bluetoothLeScanner
+        if (scanner == null) {
+            updateState(BleConnectionState.ERROR, "BLE Scanner unavailable")
+            return
+        }
+
+        if (isScanning) {
+            log("Scan already running.")
+            return
+        }
+
         isScanning = true
         updateState(BleConnectionState.SCANNING, "Searching for TandemMac...")
+
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
         scanner.startScan(null, settings, scanCallback)
+        log("BLE scan started with SCAN_MODE_LOW_LATENCY.")
 
         mainHandler.postDelayed({
             if (isScanning) {
                 stopScanning()
                 if (currentState == BleConnectionState.SCANNING) {
-                    updateState(BleConnectionState.IDLE, "Scan completed.")
-                    log("Scan timed out after 12 seconds.")
+                    updateState(BleConnectionState.IDLE, "Scan timed out (12s).")
                 }
             }
         }, 12000)
@@ -100,49 +122,63 @@ class TandemBleCentral(private val context: Context) {
     fun stopScanning() {
         if (!isScanning) return
         isScanning = false
-        bluetoothAdapter?.bluetoothLeScanner?.stopScan(scanCallback)
-        log("BLE scanning stopped.")
+        try {
+            bluetoothAdapter?.bluetoothLeScanner?.stopScan(scanCallback)
+            log("BLE scan stopped.")
+        } catch (e: Exception) {
+            log("Error stopping scan: ${e.message}")
+        }
     }
 
     private val scanCallback = object : ScanCallback() {
-        override fun onScanResult(callbackType: Int, result: ScanResult) {
+        override fun onScanResult(callbackType: Int, result: ScanResult?) {
+            result ?: return
             val device = result.device
-            val name = device.name ?: result.scanRecord?.deviceName ?: "Unknown BLE Device"
-            val address = device.address
+            val name = result.scanRecord?.deviceName ?: device.name ?: "Unknown BLE Device"
+            val address = device.address ?: "00:00:00:00:00:00"
             val rssi = result.rssi
 
-            log("Discovered device: '$name' [$address], RSSI: ${rssi}dBm")
-            val item = DiscoveredDevice(device, name, address, rssi)
-            mainHandler.post { onDeviceDiscovered?.invoke(item) }
+            val serviceUuids = result.scanRecord?.serviceUuids
+            val hasTandemUuid = serviceUuids?.any { it.uuid == BleProtocol.SERVICE_UUID } == true
+            val isTandemNamed = name.contains("Tandem", ignoreCase = true)
+
+            if (hasTandemUuid || isTandemNamed) {
+                log("Found candidate device: $name ($address, RSSI: $rssi dBm)")
+                val discovered = DiscoveredDevice(device, name, address, rssi)
+                mainHandler.post { onDeviceDiscovered?.invoke(discovered) }
+            }
         }
 
         override fun onScanFailed(errorCode: Int) {
-            log("Scan failed with error code: $errorCode")
             isScanning = false
-            updateState(BleConnectionState.ERROR, "Scan error: $errorCode")
+            log("BLE Scan failed with errorCode: $errorCode")
+            updateState(BleConnectionState.ERROR, "Scan failed: code $errorCode")
         }
     }
 
-    // MARK: - Connection Lifecycle
-
-    fun connect(device: BluetoothDevice) {
+    fun connectToDevice(device: BluetoothDevice) {
         stopScanning()
-        disconnect()
-
-        log("Initiating GATT connection to ${device.name ?: device.address}...")
         updateState(BleConnectionState.CONNECTING, "Connecting to ${device.name ?: device.address}...")
+        log("Initiating GATT connection to ${device.address} (autoConnect=false, TRANSPORT_LE)...")
 
-        bluetoothGatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        bluetoothGatt = device.connectGatt(
+            context,
+            false,
+            gattCallback,
+            BluetoothDevice.TRANSPORT_LE
+        )
     }
 
     fun disconnect() {
-        try {
-            cancelAckTimeout()
-            writeQueue.clear()
-            isWriting = false
-            pendingSendCallback = null
-            pendingMessageId = null
+        log("Disconnecting from GATT server...")
+        cancelAckTimeout()
+        writeQueue.clear()
+        isWriting = false
+        pendingSendCallback = null
+        pendingProgressCallback = null
+        pendingMessageId = null
 
+        try {
             bluetoothGatt?.disconnect()
             bluetoothGatt?.close()
             bluetoothGatt = null
@@ -231,12 +267,25 @@ class TandemBleCentral(private val context: Context) {
             mainHandler.post {
                 isWriting = false
                 if (status == BluetoothGatt.GATT_SUCCESS) {
-                    processNextWrite()
+                    sentChunksCount++
+                    if (totalChunksCount > 0) {
+                        val pct = sentChunksCount.toFloat() / totalChunksCount.toFloat()
+                        pendingProgressCallback?.invoke(pct)
+                        pendingMessageId?.let { onTransferProgress?.invoke(it, pct) }
+                    }
+
+                    if (writeQueue.isEmpty()) {
+                        log("All $totalChunksCount chunks written to GATT. Awaiting delivery ACK from Mac...")
+                        startAckTimeout(15000L)
+                    } else {
+                        processNextWrite()
+                    }
                 } else {
                     log("Characteristic write failed with status: $status")
                     cancelAckTimeout()
                     pendingSendCallback?.invoke(false, "Write failed with status $status")
                     pendingSendCallback = null
+                    pendingProgressCallback = null
                 }
             }
         }
@@ -324,11 +373,15 @@ class TandemBleCentral(private val context: Context) {
                             sendDirectAck(innerMsg.messageId)
                             return
                         }
-                        log("🔒 Valid Encrypted Message Received from Mac: id=${innerMsg.messageId}, bytes=${innerMsg.payload.toByteArray().size}")
-                        mainHandler.post {
-                            onMessageReceived?.invoke(innerMsg)
+                        if (innerMsg.type == "file") {
+                            handleIncomingFile(innerMsg)
+                        } else {
+                            log("🔒 Valid Encrypted Message Received from Mac: id=${innerMsg.messageId}, bytes=${innerMsg.payload.toByteArray().size}")
+                            mainHandler.post {
+                                onMessageReceived?.invoke(innerMsg)
+                            }
+                            sendDirectAck(innerMsg.messageId)
                         }
-                        sendDirectAck(innerMsg.messageId)
                     }
                 }
                 "text" -> {
@@ -349,6 +402,20 @@ class TandemBleCentral(private val context: Context) {
                         sendDirectAck(msg.messageId)
                     }
                 }
+                "file" -> {
+                    if (TandemCrypto.isEncrypted) {
+                        log("SECURITY REJECT: Received unencrypted plaintext file while E2EE session is active.")
+                        return
+                    }
+                    val msg = TandemMessage.fromJsonString(jsonStr)
+                    if (msg != null) {
+                        if (isDuplicateOrReplay(msg)) {
+                            sendDirectAck(msg.messageId)
+                            return
+                        }
+                        handleIncomingFile(msg)
+                    }
+                }
                 else -> {
                     if (obj.has("status") && obj.has("code")) {
                         handleAckNotification(jsonStr)
@@ -357,6 +424,69 @@ class TandemBleCentral(private val context: Context) {
             }
         } catch (e: Exception) {
             log("Error handling inbound notification: ${e.message}")
+        }
+    }
+
+    private fun sanitizeFilename(raw: String, fallbackId: String): String {
+        var cleaned = File(raw).name
+        cleaned = cleaned.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
+        cleaned = cleaned.replace("^\\.+".toRegex(), "")
+        if (cleaned.isEmpty() || cleaned == "." || cleaned == "..") {
+            cleaned = "tandem_$fallbackId.bin"
+        }
+        if (cleaned.length > 120) {
+            val ext = cleaned.substringAfterLast('.', "")
+            val base = cleaned.substringBeforeLast('.')
+            cleaned = if (ext.isNotEmpty()) "${base.take(110)}.$ext" else base.take(120)
+        }
+        return cleaned
+    }
+
+    private fun getUniqueDestinationFile(dir: File, safeName: String): File {
+        var file = File(dir, safeName)
+        if (!file.exists()) return file
+
+        val nameWithoutExt = safeName.substringBeforeLast('.')
+        val ext = safeName.substringAfterLast('.', "")
+        val extSuffix = if (ext.isNotEmpty()) ".$ext" else ""
+
+        var counter = 1
+        while (file.exists() && counter < 1000) {
+            file = File(dir, "${nameWithoutExt}_$counter$extSuffix")
+            counter++
+        }
+        return file
+    }
+
+    private fun handleIncomingFile(message: TandemMessage) {
+        try {
+            val rawBytes = Base64.decode(message.payload, Base64.DEFAULT)
+            val computedSha = computeSha256(rawBytes)
+            if (!message.sha256.isNullOrEmpty() && !computedSha.equals(message.sha256, ignoreCase = true)) {
+                log("SECURITY REJECT: SHA-256 checksum mismatch! Computed: $computedSha, Expected: ${message.sha256}")
+                sendDirectAck(message.messageId, status = "error", code = 400, error = "SHA-256 mismatch")
+                return
+            }
+            log("✓ SHA-256 Verified for incoming file: $computedSha")
+
+            val rawName = message.fileName ?: "tandem_${message.messageId}"
+            val safeName = sanitizeFilename(rawName, message.messageId.take(8))
+
+            val tandemDir = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "Tandem")
+            if (!tandemDir.exists()) tandemDir.mkdirs()
+
+            val destFile = getUniqueDestinationFile(tandemDir, safeName)
+            destFile.writeBytes(rawBytes)
+            log("📁 File saved safely: ${destFile.absolutePath} (${rawBytes.size} bytes)")
+
+            mainHandler.post {
+                onFileReceived?.invoke(message, destFile)
+                onMessageReceived?.invoke(message)
+            }
+            sendDirectAck(message.messageId)
+        } catch (e: Exception) {
+            log("FILE ERROR: Failed to save incoming file: ${e.message}")
+            sendDirectAck(message.messageId, status = "error", code = 500, error = "Save failed: ${e.message}")
         }
     }
 
@@ -388,16 +518,17 @@ class TandemBleCentral(private val context: Context) {
         return false
     }
 
-    private fun sendDirectAck(messageId: String) {
+    private fun sendDirectAck(messageId: String, status: String = "delivered", code: Int = 200, error: String? = null) {
         val ack = TandemAck(
             messageId = messageId,
-            status = "delivered",
-            code = 200
+            status = status,
+            code = code,
+            error = error
         )
         val ackBytes = ack.toJsonString().toByteArray(Charsets.UTF_8)
         val maxChunkCapacity = (negotiatedMtu - 3).coerceAtLeast(20)
         val chunks = ChunkFramer.framePayload(ackBytes, messageId, maxChunkCapacity)
-        log("Sending delivery ACK to Mac for message: $messageId (${chunks.size} chunks)")
+        log("Sending delivery ACK to Mac for message: $messageId (${chunks.size} chunks, status=$status)")
         writeQueue.addAll(chunks)
         processNextWrite()
     }
@@ -459,15 +590,98 @@ class TandemBleCentral(private val context: Context) {
 
         pendingMessageId = msgId
         pendingSendCallback = onResult
+        pendingProgressCallback = null
 
         val maxChunkCapacity = (negotiatedMtu - 3).coerceAtLeast(20)
         val chunks = ChunkFramer.framePayload(jsonPayload, msgId, maxChunkCapacity)
 
         log("Enqueueing message $msgId (${jsonPayload.size} bytes across ${chunks.size} chunks)...")
-        writeQueue.addAll(chunks)
+        totalChunksCount = chunks.size
+        sentChunksCount = 0
 
-        startAckTimeout()
+        writeQueue.addAll(chunks)
         processNextWrite()
+    }
+
+    // MARK: - Outgoing File & Attachment Transmission (v0.3)
+
+    fun sendFile(
+        fileName: String,
+        mimeType: String,
+        fileBytes: ByteArray,
+        onProgress: ((Float) -> Unit)? = null,
+        onResult: (Boolean, String) -> Unit
+    ) {
+        val gatt = bluetoothGatt
+        val rxChar = rxCharacteristic
+        if (gatt == null || rxChar == null || currentState != BleConnectionState.CONNECTED_READY) {
+            onResult(false, "Not connected to Mac")
+            return
+        }
+
+        if (fileBytes.isEmpty()) {
+            onResult(false, "Cannot send empty file")
+            return
+        }
+
+        if (fileBytes.size > BleProtocol.MAX_PAYLOAD_BYTES) {
+            val mb = BleProtocol.MAX_PAYLOAD_BYTES / (1024 * 1024)
+            onResult(false, "File exceeds $mb MB size limit")
+            return
+        }
+
+        val msgId = "file-and-" + UUID.randomUUID().toString().take(8)
+        val timestamp = BleProtocol.currentIsoTimestamp()
+        val sha256Hex = computeSha256(fileBytes)
+        val b64Payload = Base64.encodeToString(fileBytes, Base64.NO_WRAP)
+
+        val innerMsg = TandemMessage(
+            version = BleProtocol.PROTOCOL_VERSION,
+            type = "file",
+            messageId = msgId,
+            timestamp = timestamp,
+            sender = "android",
+            payload = b64Payload,
+            fileName = fileName,
+            fileSize = fileBytes.size.toLong(),
+            mimeType = mimeType,
+            sha256 = sha256Hex
+        )
+
+        val envelope: TandemMessage
+        if (TandemCrypto.isEncrypted) {
+            val ciphertext = TandemCrypto.encrypt(innerMsg.toJsonString())
+            envelope = TandemMessage(
+                version = BleProtocol.PROTOCOL_VERSION,
+                type = "encrypted",
+                messageId = msgId,
+                timestamp = timestamp,
+                sender = "android",
+                payload = ciphertext
+            )
+        } else {
+            envelope = innerMsg
+        }
+
+        val jsonPayload = envelope.toJsonString().toByteArray(Charsets.UTF_8)
+        val maxChunkCapacity = (negotiatedMtu - 3).coerceAtLeast(20)
+        val chunks = ChunkFramer.framePayload(jsonPayload, msgId, maxChunkCapacity)
+
+        log("Enqueueing outbound file '$fileName' (${fileBytes.size} bytes across ${chunks.size} chunks)...")
+        pendingMessageId = msgId
+        pendingSendCallback = onResult
+        pendingProgressCallback = onProgress
+        totalChunksCount = chunks.size
+        sentChunksCount = 0
+
+        writeQueue.addAll(chunks)
+        processNextWrite()
+    }
+
+    private fun computeSha256(bytes: ByteArray): String {
+        val md = MessageDigest.getInstance("SHA-256")
+        val digest = md.digest(bytes)
+        return digest.joinToString("") { "%02x".format(it) }
     }
 
     private fun processNextWrite() {
@@ -489,19 +703,21 @@ class TandemBleCentral(private val context: Context) {
                 cancelAckTimeout()
                 pendingSendCallback?.invoke(false, "Write failed on BLE stack")
                 pendingSendCallback = null
+                pendingProgressCallback = null
             }
         }
     }
 
-    private fun startAckTimeout() {
+    private fun startAckTimeout(timeoutMs: Long = 10000L) {
         cancelAckTimeout()
         ackTimeoutRunnable = Runnable {
-            log("ACK timeout: No delivery confirmation received within 5.0 seconds.")
+            log("ACK timeout: No delivery confirmation received within ${timeoutMs / 1000} seconds.")
             pendingSendCallback?.invoke(false, "Delivery timeout (no ACK from Mac)")
             pendingSendCallback = null
+            pendingProgressCallback = null
             pendingMessageId = null
         }
-        mainHandler.postDelayed(ackTimeoutRunnable!!, 5000)
+        mainHandler.postDelayed(ackTimeoutRunnable!!, timeoutMs)
     }
 
     private fun cancelAckTimeout() {
@@ -513,11 +729,13 @@ class TandemBleCentral(private val context: Context) {
         val ack = TandemAck.fromJsonString(jsonStr) ?: return
         if (ack.messageId == pendingMessageId) {
             cancelAckTimeout()
+            pendingProgressCallback?.invoke(1.0f)
             if (ack.status == "delivered" && ack.code == 200) {
                 log("SUCCESS: Mac confirmed delivery of message ${ack.messageId}")
                 mainHandler.post {
                     pendingSendCallback?.invoke(true, "Delivered (Ack 200)")
                     pendingSendCallback = null
+                    pendingProgressCallback = null
                     pendingMessageId = null
                 }
             } else {
@@ -525,6 +743,7 @@ class TandemBleCentral(private val context: Context) {
                 mainHandler.post {
                     pendingSendCallback?.invoke(false, "Error ${ack.code}: ${ack.error}")
                     pendingSendCallback = null
+                    pendingProgressCallback = null
                     pendingMessageId = null
                 }
             }
